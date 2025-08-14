@@ -1,0 +1,57 @@
+// Example protobuf schema for blockchain events
+// This should match the protobuf messages your substreams-sink-kafka produces
+
+syntax = "proto3";
+
+package blockchain;
+
+option java_package = "com.blockchain.events";
+option java_outer_classname = "BlockchainProto";
+
+// Main blockchain event message
+message BlockchainEvent {
+  // Block information
+  BlockInfo block = 1;
+  
+  // Transaction details
+  repeated Transaction transactions = 2;
+  
+  // Event metadata
+  EventMetadata metadata = 3;
+}
+
+message BlockInfo {
+  uint64 number = 1;
+  string hash = 2;
+  string parent_hash = 3;
+  uint64 timestamp = 4;
+  string miner = 5;
+  uint64 gas_limit = 6;
+  uint64 gas_used = 7;
+}
+
+message Transaction {
+  string hash = 1;
+  string from_address = 2;
+  string to_address = 3;
+  string value = 4;
+  uint64 gas = 5;
+  string gas_price = 6;
+  uint64 nonce = 7;
+  bytes input_data = 8;
+  TransactionStatus status = 9;
+}
+
+message EventMetadata {
+  string source = 1;
+  uint64 processed_at = 2;
+  string version = 3;
+  string chain_id = 4;
+}
+
+enum TransactionStatus {
+  UNKNOWN = 0;
+  PENDING = 1;
+  CONFIRMED = 2;
+  FAILED = 3;
+}

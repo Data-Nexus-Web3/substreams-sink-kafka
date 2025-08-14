@@ -1,0 +1,74 @@
+syntax = "proto3";
+
+package evm.adr.v1;
+
+// import "parquet/options.proto"; // Commented out for Schema Registry compatibility
+
+message ListenerMessage {
+  string version = 1;
+  string network = 2;
+  string prev_cursor = 3;
+  repeated Transaction transactions = 4;
+  optional Metadata metadata = 5;
+}
+
+message Transaction {
+  // option (parquet.table_name) = "transactions"; // Commented out for Schema Registry
+  
+  string id = 1;
+  string cursor = 2;
+  int64 timestamp = 3;
+  bool successful = 4;
+  optional string memo = 5;
+  optional string raw = 6;
+  repeated Activity activities = 7;
+  repeated Operation operations = 8;
+}
+
+message Activity {
+  // option (parquet.table_name) = "activities"; // Commented out for Schema Registry
+  
+  string type = 1;
+  repeated string operations = 2;
+  optional Perspectives perspectives = 3;
+}
+
+message Perspectives {
+  repeated string wallets = 1;
+  repeated string tokens = 2;
+}
+
+message Operation {
+  // option (parquet.table_name) = "operations"; // Commented out for Schema Registry
+  
+  string id = 1;
+  string token = 2;
+  string address = 3;
+  string amount = 4;
+  string type = 5;
+}
+
+message Metadata {
+  int64 received_at = 1;
+  int64 sent_at = 2;
+  optional string provider = 3;
+  repeated TokenMetadata tokens = 4;
+}
+
+message TokenMetadata {
+  string address = 1;
+  optional string symbol = 2;
+  optional string name = 3;
+  string decimals = 4;
+}
+
+message ActiveAddresses {
+  repeated ActiveAddress addresses = 1;
+}
+
+message ActiveAddress {
+  string id = 1;
+  uint64 block_num = 2;
+  string address = 3;
+  string type = 4; // "token" or "wallet"
+} 

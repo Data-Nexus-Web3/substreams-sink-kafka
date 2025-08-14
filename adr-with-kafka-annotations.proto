@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package evm.adr.v1;
+
+// Import hypothetical Kafka sink annotations
+import "sf/substreams/sink/kafka/v1/kafka.proto";
+
+message ListenerMessage {
+  // This would stay as the main topic (current behavior)
+  option (kafka.topic_name) = "adr_messages";
+  
+  string version = 1;
+  string network = 2;
+  string prev_cursor = 3;
+  repeated Transaction transactions = 4 [(kafka.explode_to_topic) = "adr_transactions"];
+  optional Metadata metadata = 5;
+}
+
+message Transaction {
+  // This gets exploded into its own topic
+  option (kafka.topic_name) = "adr_transactions";
+  option (kafka.include_parent_fields) = "version,network,metadata.received_at,metadata.provider";
+  
+  string id = 1;
+  string cursor = 2;
+  int64 timestamp = 3;
+  bool successful = 4;
+  optional string memo = 5;
+  optional string raw = 6;
+  repeated Activity activities = 7 [(kafka.explode_to_topic) = "adr_activities"];
+  repeated Operation operations = 8 [(kafka.explode_to_topic) = "adr_operations"];
+}
+
+message Activity {
+  option (kafka.topic_name) = "adr_activities";
+  option (kafka.include_parent_fields) = "version,network,id,cursor";
+  
+  string type = 1;
+  repeated string operations = 2;
+  optional Perspectives perspectives = 3;
+}
+
+message Operation {
+  option (kafka.topic_name) = "adr_operations";
+  option (kafka.include_parent_fields) = "version,network,id,cursor";
+  
+  string id = 1;
+  string token = 2;
+  string address = 3;
+  string amount = 4;
+  string type = 5;
+}
+
+message Metadata {
+  int64 received_at = 1;
+  int64 sent_at = 2;
+  optional string provider = 3;
+  repeated TokenMetadata tokens = 4;
+}
+
+message TokenMetadata {
+  string address = 1;
+  optional string symbol = 2;
+  optional string name = 3;
+  string decimals = 4;
+}
