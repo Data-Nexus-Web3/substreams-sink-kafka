@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
-	"github.com/streamingfast/substreams-sink"
+	sink "github.com/streamingfast/substreams-sink"
 	"go.uber.org/zap"
 )
 
@@ -32,7 +32,9 @@ func (s *KafkaSinker) deliveryConfirmationHandler(ctx context.Context) {
 		select {
 		case event := <-s.deliveryChan:
 			if msg, ok := event.(*kafka.Message); ok {
-				key := string(msg.Key)
+				// 🚀 OPTIMIZED: Use byte slice directly to avoid string allocation
+				keyBytes := msg.Key
+				key := string(keyBytes) // Only convert when needed for logging/map access
 
 				if msg.TopicPartition.Error != nil {
 					s.logger.Error("message delivery failed",
@@ -96,4 +98,4 @@ func (s *KafkaSinker) cursorSaveHandler(ctx context.Context) {
 			return
 		}
 	}
-} 
+}

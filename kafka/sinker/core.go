@@ -3,6 +3,8 @@ package sinker
 import (
 	"context"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -27,8 +29,16 @@ func (s *KafkaSinker) HandleBlockScopedData(ctx context.Context, data *pbsubstre
 }
 
 func (s *KafkaSinker) handleWithoutExplosion(ctx context.Context, data *pbsubstreamsrpc.BlockScopedData, isLive *bool, cursor *sink.Cursor) error {
-	// Create message key from block information
-	key := fmt.Sprintf("block_%d_%s", data.Clock.Number, data.Clock.Id)
+	// 🚀 OPTIMIZED KEY GENERATION: Use string builder from pool instead of fmt.Sprintf
+	keyBuilder := stringBuilderPool.Get().(*strings.Builder)
+	defer stringBuilderPool.Put(keyBuilder)
+
+	keyBuilder.Reset()
+	keyBuilder.WriteString("block_")
+	keyBuilder.WriteString(strconv.FormatUint(data.Clock.Number, 10))
+	keyBuilder.WriteString("_")
+	keyBuilder.WriteString(data.Clock.Id)
+	key := keyBuilder.String()
 
 	// Serialize based on output format
 	var messageBytes []byte

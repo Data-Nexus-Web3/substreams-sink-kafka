@@ -805,8 +805,18 @@ func (s *KafkaSinker) createExplodedMessage(item protoreflect.Value, field proto
 		return nil
 	}
 
-	// Create message key
-	key := fmt.Sprintf("exploded_%d_%s_%d", data.Clock.Number, data.Clock.Id, index)
+	// 🚀 OPTIMIZED KEY GENERATION: Use string builder from pool instead of fmt.Sprintf
+	keyBuilder := stringBuilderPool.Get().(*strings.Builder)
+	defer stringBuilderPool.Put(keyBuilder)
+
+	keyBuilder.Reset()
+	keyBuilder.WriteString("exploded_")
+	keyBuilder.WriteString(strconv.FormatUint(data.Clock.Number, 10))
+	keyBuilder.WriteString("_")
+	keyBuilder.WriteString(data.Clock.Id)
+	keyBuilder.WriteString("_")
+	keyBuilder.WriteString(strconv.Itoa(index))
+	key := keyBuilder.String()
 
 	return &ExplodedMessage{
 		Topic:          targetTopic,
