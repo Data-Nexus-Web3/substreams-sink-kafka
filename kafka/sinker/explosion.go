@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	sink "github.com/streamingfast/substreams-sink"
@@ -17,7 +19,23 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
-// handleWithFieldExplosion processes messages by exploding a single specified array field
+// ExplodedArrayItem represents a single array item ready for batch processing
+type ExplodedArrayItem struct {
+	Value     protoreflect.Value
+	Field     protoreflect.FieldDescriptor
+	Index     int
+	BlockData *pbsubstreamsrpc.BlockScopedData
+	Cursor    *sink.Cursor
+}
+
+// BatchedKafkaMessage represents a serialized message ready for Kafka production
+type BatchedKafkaMessage struct {
+	Key          string
+	MessageBytes []byte
+	Cursor       *sink.Cursor
+}
+
+// handleWithFieldExplosion processes messages by exploding a single specified array field using batch processing
 func (s *KafkaSinker) handleWithFieldExplosion(ctx context.Context, data *pbsubstreamsrpc.BlockScopedData, isLive *bool, cursor *sink.Cursor) error {
 	s.logger.Debug("Processing with field explosion",
 		zap.String("explode_field", s.explodeFieldName),
@@ -52,15 +70,208 @@ func (s *KafkaSinker) handleWithFieldExplosion(ctx context.Context, data *pbsubs
 		zap.Uint64("block_number", data.Clock.Number),
 	)
 
-	// Create and produce a message for each array item
+	// Early return for empty arrays
+	if arraySize == 0 {
+		return nil
+	}
+
+	// 🚀 BATCH PROCESSING: Pre-allocate batch slice for optimal performance
+	batch := make([]*ExplodedArrayItem, 0, arraySize)
+
+	// Build batch of items to process
 	for i := 0; i < arraySize; i++ {
-		err := s.produceExplodedArrayItem(listValue.Get(i), field, i, data, cursor)
-		if err != nil {
-			return fmt.Errorf("failed to produce exploded message for item %d: %w", i, err)
+		item := &ExplodedArrayItem{
+			Value:     listValue.Get(i),
+			Field:     field,
+			Index:     i,
+			BlockData: data,
+			Cursor:    cursor,
+		}
+		batch = append(batch, item)
+	}
+
+	// Process the entire batch efficiently
+	return s.processBatchedArrayItems(batch)
+}
+
+// processBatchedArrayItems efficiently processes a batch of array items using optimized patterns
+func (s *KafkaSinker) processBatchedArrayItems(batch []*ExplodedArrayItem) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	startTime := time.Now()
+
+	// 🚀 PERFORMANCE: Pre-allocate slice for batch messages to avoid repeated allocations
+	batchMessages := make([]*BatchedKafkaMessage, 0, len(batch))
+
+	// Pre-allocate string builder for efficient key generation (avoids fmt.Sprintf allocations)
+	var keyBuilder strings.Builder
+	keyBuilder.Grow(64) // Pre-allocate reasonable buffer size
+
+	// Pre-allocate dynamic message for schema-registry to avoid repeated allocations
+	var reusableMsg *dynamicpb.Message
+	var individualMsgDesc protoreflect.MessageDescriptor
+	if s.outputFormat == "schema-registry" && len(batch) > 0 {
+		individualMsgDesc = batch[0].Field.Message()
+		if individualMsgDesc != nil {
+			reusableMsg = dynamicpb.NewMessage(individualMsgDesc)
 		}
 	}
 
-	// Do NOT produce the original message (per requirements)
+	s.logger.Debug("Processing batch of exploded array items",
+		zap.Int("batch_size", len(batch)),
+		zap.String("output_format", s.outputFormat),
+	)
+
+	// Serialize all items in the batch
+	for _, item := range batch {
+		// 🚀 OPTIMIZED KEY GENERATION: Use string builder instead of fmt.Sprintf
+		keyBuilder.Reset()
+		keyBuilder.WriteString("block_")
+		keyBuilder.WriteString(strconv.FormatUint(item.BlockData.Clock.Number, 10))
+		keyBuilder.WriteString("_")
+		keyBuilder.WriteString(item.BlockData.Clock.Id)
+		keyBuilder.WriteString("_")
+		keyBuilder.WriteString(strconv.Itoa(item.Index))
+		key := keyBuilder.String()
+
+		// Serialize the array item based on output format
+		messageBytes, err := s.serializeBatchedArrayItem(item, reusableMsg)
+		if err != nil {
+			return fmt.Errorf("failed to serialize batch item %d: %w", item.Index, err)
+		}
+
+		// Add to batch messages
+		batchMessages = append(batchMessages, &BatchedKafkaMessage{
+			Key:          key,
+			MessageBytes: messageBytes,
+			Cursor:       item.Cursor,
+		})
+	}
+
+	serializationTime := time.Since(startTime)
+
+	// 🚀 BATCH KAFKA PRODUCTION: Produce all messages efficiently
+	productionStart := time.Now()
+	err := s.produceBatchMessages(batchMessages)
+	if err != nil {
+		return fmt.Errorf("failed to produce batch messages: %w", err)
+	}
+	productionTime := time.Since(productionStart)
+
+	s.logger.Debug("Batch processing completed",
+		zap.Int("batch_size", len(batch)),
+		zap.Duration("serialization_time", serializationTime),
+		zap.Duration("production_time", productionTime),
+		zap.Duration("total_time", time.Since(startTime)),
+	)
+
+	return nil
+}
+
+// serializeBatchedArrayItem serializes a single array item using optimized patterns
+func (s *KafkaSinker) serializeBatchedArrayItem(item *ExplodedArrayItem, reusableMsg *dynamicpb.Message) ([]byte, error) {
+	switch s.outputFormat {
+	case "json":
+		// Convert the array item to a JSON-serializable value and serialize
+		itemValue := s.convertProtoreflectValue(item.Value)
+		return json.Marshal(itemValue)
+
+	case "protobuf":
+		// For protobuf, serialize the message directly if it's a message type
+		if item.Value.Message().IsValid() {
+			return proto.Marshal(item.Value.Message().Interface())
+		} else {
+			// For primitive types, convert to JSON as fallback
+			itemValue := s.convertProtoreflectValue(item.Value)
+			return json.Marshal(itemValue)
+		}
+
+	case "schema-registry":
+		// For schema registry explosion, serialize individual messages using reusable message
+		if item.Value.Message().IsValid() {
+			// 🚀 PERFORMANCE OPTIMIZATION: Reuse dynamic message instead of creating new ones
+			if reusableMsg != nil {
+				// Clear the reusable message
+				reusableMsg.Reset()
+				// Copy the data from the array item to the reusable message
+				proto.Merge(reusableMsg, item.Value.Message().Interface())
+
+				// Use the topic name as subject - Confluent ProtobufConverter expects {topic}-value pattern
+				return s.protobufSerializer.Serialize(s.topic, reusableMsg)
+			} else {
+				// Fallback to creating new message if reusable message is not available
+				individualMsgDesc := item.Field.Message()
+				individualMsg := dynamicpb.NewMessage(individualMsgDesc)
+				proto.Merge(individualMsg, item.Value.Message().Interface())
+				return s.protobufSerializer.Serialize(s.topic, individualMsg)
+			}
+		} else {
+			// For primitive types, convert to JSON as fallback
+			itemValue := s.convertProtoreflectValue(item.Value)
+			return json.Marshal(itemValue)
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported output format: %s", s.outputFormat)
+	}
+}
+
+// produceBatchMessages efficiently produces a batch of messages to Kafka
+func (s *KafkaSinker) produceBatchMessages(batchMessages []*BatchedKafkaMessage) error {
+	if len(batchMessages) == 0 {
+		return nil
+	}
+
+	// Track pending messages for delivery confirmation
+	for _, msg := range batchMessages {
+		s.addPendingMessage(msg.Key, msg.Cursor)
+	}
+
+	// 🚀 BATCH PRODUCTION: Produce all messages in sequence for optimal throughput
+	// Note: Kafka's librdkafka automatically batches these internally for network efficiency
+	var failedKeys []string
+	for _, msg := range batchMessages {
+		err := s.producer.Produce(&kafka.Message{
+			TopicPartition: kafka.TopicPartition{
+				Topic:     &s.topic,
+				Partition: kafka.PartitionAny,
+			},
+			Key:   []byte(msg.Key),
+			Value: msg.MessageBytes,
+		}, s.deliveryChan)
+
+		if err != nil {
+			// Track failed message for cleanup
+			failedKeys = append(failedKeys, msg.Key)
+			s.logger.Error("Failed to produce batch message",
+				zap.String("key", msg.Key),
+				zap.Error(err))
+		}
+	}
+
+	// Clean up failed messages from pending tracking
+	for _, key := range failedKeys {
+		s.removePendingMessage(key)
+	}
+
+	// Update metrics atomically
+	successCount := len(batchMessages) - len(failedKeys)
+	atomic.AddInt64(&s.messagesProduced, int64(successCount))
+	atomic.AddInt64(&s.messagesPending, int64(successCount))
+
+	s.logger.Debug("Batch messages produced",
+		zap.Int("total_messages", len(batchMessages)),
+		zap.Int("successful_messages", successCount),
+		zap.Int("failed_messages", len(failedKeys)),
+	)
+
+	// Return error if any messages failed
+	if len(failedKeys) > 0 {
+		return fmt.Errorf("failed to produce %d out of %d batch messages", len(failedKeys), len(batchMessages))
+	}
+
 	return nil
 }
 
