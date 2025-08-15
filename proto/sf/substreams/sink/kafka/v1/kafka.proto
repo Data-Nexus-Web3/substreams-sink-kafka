@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package sf.substreams.sink.kafka.v1;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/streamingfast/substreams-sink-kafka/proto/sf/substreams/sink/kafka/v1;pbkafka";
+
+// Kafka-specific annotations for message explosion and topic configuration
+extend google.protobuf.MessageOptions {
+  // Define the Kafka topic name for this message type
+  string topic_name = 50001;
+  
+  // Include parent fields when exploding nested messages
+  // Format: "field1,field2,nested.field3"
+  string include_parent_fields = 50002;
+  
+  // Whether this message should be treated as a root topic (default: false)
+  bool is_root_topic = 50003;
+}
+
+extend google.protobuf.FieldOptions {
+  // Explode this repeated field into a separate topic
+  // Value is the target topic name
+  string explode_to_topic = 50101;
+  
+  // Whether to include this field in parent context when exploding
+  bool include_in_parent_context = 50102;
+  
+  // Custom key field for this explosion (default: use index)
+  string explosion_key_field = 50103;
+}
+
+// Configuration message for explosion behavior
+message ExplosionConfig {
+  // Global explosion mode
+  ExplosionMode mode = 1;
+  
+  // Custom topic mappings
+  map<string, TopicConfig> topic_configs = 2;
+  
+  // Default parent fields to include in all explosions
+  repeated string default_parent_fields = 3;
+}
+
+enum ExplosionMode {
+  EXPLOSION_MODE_UNSPECIFIED = 0;
+  EXPLOSION_MODE_NONE = 1;        // No explosion (current behavior)
+  EXPLOSION_MODE_ANNOTATIONS = 2;  // Use proto annotations
+  EXPLOSION_MODE_CONFIG = 3;       // Use external config file
+}
+
+message TopicConfig {
+  // Target topic name
+  string topic_name = 1;
+  
+  // Parent fields to include
+  repeated string parent_fields = 2;
+  
+  // Custom serialization format for this topic
+  string serialization_format = 3; // "json", "protobuf", "schema-registry"
+  
+  // Custom key extraction
+  string key_field = 4;
+}

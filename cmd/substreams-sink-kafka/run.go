@@ -45,6 +45,9 @@ func addKafkaFlags(flags *pflag.FlagSet) {
 	flags.String("schema-registry-url", "", "Schema Registry URL (e.g., http://localhost:8081) - required for schema-registry format")
 	flags.String("schema-subject", "", "Schema subject name (defaults to {topic}-value)")
 	flags.Bool("schema-auto-register", true, "Automatically register schemas if they don't exist")
+
+	// Simple explosion flag for array field handling
+	flags.String("explode-field", "", "Field name to explode (must be an array field). Each array item becomes a separate message.")
 }
 
 func sinkRunE(cmd *cobra.Command, args []string) error {
@@ -137,14 +140,22 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 	schemaSubject := sflags.MustGetString(cmd, "schema-subject")
 	schemaAutoRegister := sflags.MustGetBool(cmd, "schema-auto-register")
 
+	// Get explosion configuration from flags
+	explodeField := sflags.MustGetString(cmd, "explode-field")
+
 	// Validate Schema Registry configuration for schema-registry format
 	if outputFormat == "schema-registry" && schemaRegistryURL == "" {
 		return fmt.Errorf("--schema-registry-url is required when using --output-format=schema-registry")
 	}
 
-	// Default schema subject to {topic}-value if not specified
+	// Validate explosion configuration
+	// No validation needed for explode-field - empty string means no explosion
+
+	// Default schema subject based on output format
+	// For schema-registry with protobuf, Confluent auto-generates {topic}-value-value
+	// So we pass just the topic name to let Confluent handle the suffix generation
 	if schemaSubject == "" && outputFormat == "schema-registry" {
-		schemaSubject = kafkaTopic + "-value"
+		schemaSubject = kafkaTopic
 	}
 
 	logFields := []zap.Field{
@@ -154,6 +165,7 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 		zap.String("endpoint", endpoint),
 		zap.Int("batch_size", batchSize),
 		zap.String("output_format", outputFormat),
+		zap.String("explode_field", explodeField),
 	}
 
 	if outputFormat == "schema-registry" {
@@ -182,6 +194,7 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 		SchemaRegistryURL:  schemaRegistryURL,
 		SchemaSubject:      schemaSubject,
 		SchemaAutoRegister: schemaAutoRegister,
+		ExplodeField:       explodeField,
 	})
 
 	kafkaSink, err := sinkerFactory(app.Context(), zlog, tracer)

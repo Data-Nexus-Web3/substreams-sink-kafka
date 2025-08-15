@@ -111,6 +111,3 @@ services:
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: main
       KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://kafka-connect:8083
 
-volumes:
-  kafka-data:
-    driver: local

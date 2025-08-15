@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package sf.substreams.sink.kafka.v1;
+
+option go_package = "github.com/streamingfast/substreams-sink-kafka/proto/sf/substreams/sink/kafka/v1;pbkafka";
+
+import "google/protobuf/any.proto";
+import "google/protobuf/struct.proto";
+
+// ExplodedRecord represents a single exploded record from a repeated field
+message ExplodedRecord {
+  // The original field name that was exploded
+  string source_field = 1;
+  
+  // The exploded data as a flexible structure
+  google.protobuf.Struct data = 2;
+  
+  // Parent context fields (from include_parent_fields annotation)
+  google.protobuf.Struct parent_context = 3;
+  
+  // Index of this item in the original repeated field
+  int32 item_index = 4;
+  
+  // Original cursor/metadata
+  string cursor = 5;
+  
+  // Additional metadata
+  map<string, string> metadata = 6;
+}

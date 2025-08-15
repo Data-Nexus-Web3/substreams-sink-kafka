@@ -1,0 +1,82 @@
+syntax = "proto3";
+
+package evm.adr.v1;
+
+import "proto/sf/substreams/sink/kafka/v1/kafka.proto";
+
+option go_package = "github.com/streamingfast/substreams-sink-kafka/docker/protobuf-example;adr";
+
+message ListenerMessage {
+  option (sf.substreams.sink.kafka.v1.topic_name) = "adr_messages";
+  option (sf.substreams.sink.kafka.v1.include_parent_fields) = "version,network";
+
+  string version = 1;
+  string network = 2;
+  string prev_cursor = 3;
+  repeated Transaction transactions = 4 [(sf.substreams.sink.kafka.v1.explode_to_topic) = "adr_transactions"];
+  optional Metadata metadata = 5;
+}
+
+message Transaction {
+  option (sf.substreams.sink.kafka.v1.topic_name) = "adr_transactions";
+  option (sf.substreams.sink.kafka.v1.include_parent_fields) = "version,network";
+  
+  string id = 1;
+  string cursor = 2;
+  int64 timestamp = 3;
+  bool successful = 4;
+  optional string memo = 5;
+  optional string raw = 6;
+  repeated Activity activities = 7 [(sf.substreams.sink.kafka.v1.explode_to_topic) = "adr_activities"];
+  repeated Operation operations = 8 [(sf.substreams.sink.kafka.v1.explode_to_topic) = "adr_operations"];
+}
+
+message Activity {
+  option (sf.substreams.sink.kafka.v1.topic_name) = "adr_activities";
+  option (sf.substreams.sink.kafka.v1.include_parent_fields) = "version,network,id";
+  
+  string type = 1;
+  repeated string operations = 2;
+  optional Perspectives perspectives = 3;
+}
+
+message Perspectives {
+  repeated string wallets = 1;
+  repeated string tokens = 2;
+}
+
+message Operation {
+  option (sf.substreams.sink.kafka.v1.topic_name) = "adr_operations";
+  option (sf.substreams.sink.kafka.v1.include_parent_fields) = "version,network,id";
+  
+  string id = 1;
+  string token = 2;
+  string address = 3;
+  string amount = 4;
+  string type = 5;
+}
+
+message Metadata {
+  int64 received_at = 1;
+  int64 sent_at = 2;
+  optional string provider = 3;
+  repeated TokenMetadata tokens = 4;
+}
+
+message TokenMetadata {
+  string address = 1;
+  optional string symbol = 2;
+  optional string name = 3;
+  string decimals = 4;
+}
+
+message ActiveAddresses {
+  repeated ActiveAddress addresses = 1;
+}
+
+message ActiveAddress {
+  string id = 1;
+  uint64 block_num = 2;
+  string address = 3;
+  string type = 4; // "token" or "wallet"
+}
