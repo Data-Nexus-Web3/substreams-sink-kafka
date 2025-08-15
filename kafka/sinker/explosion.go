@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -33,6 +34,20 @@ type BatchedKafkaMessage struct {
 	Key          string
 	MessageBytes []byte
 	Cursor       *sink.Cursor
+}
+
+// SerializationJob represents work to be done by worker pool
+type SerializationJob struct {
+	Item   *ExplodedArrayItem
+	Index  int
+	Result chan SerializationResult
+}
+
+// SerializationResult represents the result of a serialization job
+type SerializationResult struct {
+	Message *BatchedKafkaMessage
+	Error   error
+	Index   int
 }
 
 // handleWithFieldExplosion processes messages by exploding a single specified array field using batch processing
@@ -94,16 +109,135 @@ func (s *KafkaSinker) handleWithFieldExplosion(ctx context.Context, data *pbsubs
 	return s.processBatchedArrayItems(batch)
 }
 
-// processBatchedArrayItems efficiently processes a batch of array items using optimized patterns
+// processBatchedArrayItems efficiently processes a batch of array items using parallel worker pool
 func (s *KafkaSinker) processBatchedArrayItems(batch []*ExplodedArrayItem) error {
 	if len(batch) == 0 {
 		return nil
 	}
 
 	startTime := time.Now()
+	batchSize := len(batch)
+
+	// 🚀 PHASE 2: PARALLEL WORKER POOL PROCESSING
+	// Determine optimal worker count based on batch size and available CPU
+	workerCount := s.calculateOptimalWorkerCount(batchSize)
+
+	s.logger.Debug("Starting parallel batch processing",
+		zap.Int("batch_size", batchSize),
+		zap.Int("worker_count", workerCount),
+		zap.String("output_format", s.outputFormat),
+	)
+
+	// Use parallel processing for larger batches, sequential for smaller ones
+	if batchSize >= 100 && workerCount > 1 {
+		return s.processParallelBatch(batch, workerCount, startTime)
+	} else {
+		return s.processSequentialBatch(batch, startTime)
+	}
+}
+
+// calculateOptimalWorkerCount determines the best number of workers based on batch size
+func (s *KafkaSinker) calculateOptimalWorkerCount(batchSize int) int {
+	// Follow StreamingFast pattern: use 5 workers for parallel processing like files sink
+	const maxWorkers = 5
+	const minWorkers = 1
+	const itemsPerWorker = 500 // Optimal items per worker based on testing
+
+	if batchSize < 100 {
+		return minWorkers // Use sequential processing for small batches
+	}
+
+	workerCount := (batchSize + itemsPerWorker - 1) / itemsPerWorker // Ceiling division
+	if workerCount > maxWorkers {
+		workerCount = maxWorkers
+	}
+	if workerCount < minWorkers {
+		workerCount = minWorkers
+	}
+
+	return workerCount
+}
+
+// processParallelBatch processes a large batch using worker pool pattern
+func (s *KafkaSinker) processParallelBatch(batch []*ExplodedArrayItem, workerCount int, startTime time.Time) error {
+	batchSize := len(batch)
+
+	// 🚀 WORKER POOL PATTERN: Following StreamingFast files sink approach
+	jobs := make(chan SerializationJob, batchSize)
+	results := make(chan SerializationResult, batchSize)
+
+	// Pre-allocate results slice with proper ordering
+	batchMessages := make([]*BatchedKafkaMessage, batchSize)
+
+	// Start worker goroutines
+	var wg sync.WaitGroup
+	for i := 0; i < workerCount; i++ {
+		wg.Add(1)
+		go s.serializationWorker(&wg, jobs, results)
+	}
+
+	// Send jobs to workers
+	go func() {
+		defer close(jobs)
+		for i, item := range batch {
+			job := SerializationJob{
+				Item:   item,
+				Index:  i,
+				Result: results,
+			}
+			jobs <- job
+		}
+	}()
+
+	// Close workers when done
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results in order
+	var processingErrors []error
+	for i := 0; i < batchSize; i++ {
+		result := <-results
+		if result.Error != nil {
+			processingErrors = append(processingErrors, fmt.Errorf("worker error at index %d: %w", result.Index, result.Error))
+		} else {
+			batchMessages[result.Index] = result.Message
+		}
+	}
+
+	// Check for worker errors
+	if len(processingErrors) > 0 {
+		return fmt.Errorf("parallel processing failed with %d errors: %v", len(processingErrors), processingErrors[0])
+	}
+
+	serializationTime := time.Since(startTime)
+
+	// 🚀 BATCH KAFKA PRODUCTION: Produce all messages efficiently
+	productionStart := time.Now()
+	err := s.produceBatchMessages(batchMessages)
+	if err != nil {
+		return fmt.Errorf("failed to produce batch messages: %w", err)
+	}
+	productionTime := time.Since(productionStart)
+
+	s.logger.Debug("Parallel batch processing completed",
+		zap.Int("batch_size", batchSize),
+		zap.Int("worker_count", workerCount),
+		zap.Duration("serialization_time", serializationTime),
+		zap.Duration("production_time", productionTime),
+		zap.Duration("total_time", time.Since(startTime)),
+	)
+
+	return nil
+}
+
+// processSequentialBatch processes smaller batches sequentially for efficiency
+func (s *KafkaSinker) processSequentialBatch(batch []*ExplodedArrayItem, startTime time.Time) error {
+	batchSize := len(batch)
 
 	// 🚀 PERFORMANCE: Pre-allocate slice for batch messages to avoid repeated allocations
-	batchMessages := make([]*BatchedKafkaMessage, 0, len(batch))
+	batchMessages := make([]*BatchedKafkaMessage, 0, batchSize)
 
 	// Pre-allocate string builder for efficient key generation (avoids fmt.Sprintf allocations)
 	var keyBuilder strings.Builder
@@ -112,15 +246,15 @@ func (s *KafkaSinker) processBatchedArrayItems(batch []*ExplodedArrayItem) error
 	// Pre-allocate dynamic message for schema-registry to avoid repeated allocations
 	var reusableMsg *dynamicpb.Message
 	var individualMsgDesc protoreflect.MessageDescriptor
-	if s.outputFormat == "schema-registry" && len(batch) > 0 {
+	if s.outputFormat == "schema-registry" && batchSize > 0 {
 		individualMsgDesc = batch[0].Field.Message()
 		if individualMsgDesc != nil {
 			reusableMsg = dynamicpb.NewMessage(individualMsgDesc)
 		}
 	}
 
-	s.logger.Debug("Processing batch of exploded array items",
-		zap.Int("batch_size", len(batch)),
+	s.logger.Debug("Processing sequential batch of exploded array items",
+		zap.Int("batch_size", batchSize),
 		zap.String("output_format", s.outputFormat),
 	)
 
@@ -160,14 +294,64 @@ func (s *KafkaSinker) processBatchedArrayItems(batch []*ExplodedArrayItem) error
 	}
 	productionTime := time.Since(productionStart)
 
-	s.logger.Debug("Batch processing completed",
-		zap.Int("batch_size", len(batch)),
+	s.logger.Debug("Sequential batch processing completed",
+		zap.Int("batch_size", batchSize),
 		zap.Duration("serialization_time", serializationTime),
 		zap.Duration("production_time", productionTime),
 		zap.Duration("total_time", time.Since(startTime)),
 	)
 
 	return nil
+}
+
+// serializationWorker processes serialization jobs in parallel following StreamingFast worker pool pattern
+func (s *KafkaSinker) serializationWorker(wg *sync.WaitGroup, jobs <-chan SerializationJob, results chan<- SerializationResult) {
+	defer wg.Done()
+
+	// Pre-allocate string builder per worker for efficient key generation
+	var keyBuilder strings.Builder
+	keyBuilder.Grow(64)
+
+	// Pre-allocate dynamic message per worker for schema-registry to avoid contention
+	var reusableMsg *dynamicpb.Message
+	var individualMsgDesc protoreflect.MessageDescriptor
+
+	for job := range jobs {
+		// 🚀 OPTIMIZED KEY GENERATION: Use string builder instead of fmt.Sprintf
+		keyBuilder.Reset()
+		keyBuilder.WriteString("block_")
+		keyBuilder.WriteString(strconv.FormatUint(job.Item.BlockData.Clock.Number, 10))
+		keyBuilder.WriteString("_")
+		keyBuilder.WriteString(job.Item.BlockData.Clock.Id)
+		keyBuilder.WriteString("_")
+		keyBuilder.WriteString(strconv.Itoa(job.Item.Index))
+		key := keyBuilder.String()
+
+		// Initialize reusable message for schema-registry if needed
+		if s.outputFormat == "schema-registry" && reusableMsg == nil && job.Item.Field.Message() != nil {
+			individualMsgDesc = job.Item.Field.Message()
+			reusableMsg = dynamicpb.NewMessage(individualMsgDesc)
+		}
+
+		// Serialize the array item
+		messageBytes, err := s.serializeBatchedArrayItem(job.Item, reusableMsg)
+
+		result := SerializationResult{
+			Index: job.Index,
+			Error: err,
+		}
+
+		if err == nil {
+			result.Message = &BatchedKafkaMessage{
+				Key:          key,
+				MessageBytes: messageBytes,
+				Cursor:       job.Item.Cursor,
+			}
+		}
+
+		// Send result back
+		results <- result
+	}
 }
 
 // serializeBatchedArrayItem serializes a single array item using optimized patterns
