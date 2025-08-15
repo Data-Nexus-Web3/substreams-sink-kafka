@@ -20,6 +20,47 @@ import (
 	"google.golang.org/protobuf/types/dynamicpb"
 )
 
+// 🚀 PHASE 3: OBJECT POOLS FOR MEMORY OPTIMIZATION
+var (
+	// Pool for ExplodedArrayItem slices to avoid repeated allocations
+	explodedItemSlicePool = sync.Pool{
+		New: func() interface{} {
+			// Pre-allocate with reasonable capacity
+			return make([]*ExplodedArrayItem, 0, 1000)
+		},
+	}
+
+	// Pool for BatchedKafkaMessage slices to avoid repeated allocations
+	batchedMessageSlicePool = sync.Pool{
+		New: func() interface{} {
+			return make([]*BatchedKafkaMessage, 0, 1000)
+		},
+	}
+
+	// Pool for string builders to avoid repeated allocations
+	stringBuilderPool = sync.Pool{
+		New: func() interface{} {
+			var sb strings.Builder
+			sb.Grow(64) // Pre-allocate reasonable buffer size
+			return &sb
+		},
+	}
+
+	// Pool for SerializationJob slices for worker communication
+	jobSlicePool = sync.Pool{
+		New: func() interface{} {
+			return make([]SerializationJob, 0, 1000)
+		},
+	}
+
+	// Pool for error slices to avoid allocations during error handling
+	errorSlicePool = sync.Pool{
+		New: func() interface{} {
+			return make([]error, 0, 10)
+		},
+	}
+)
+
 // ExplodedArrayItem represents a single array item ready for batch processing
 type ExplodedArrayItem struct {
 	Value     protoreflect.Value
@@ -90,8 +131,14 @@ func (s *KafkaSinker) handleWithFieldExplosion(ctx context.Context, data *pbsubs
 		return nil
 	}
 
-	// 🚀 BATCH PROCESSING: Pre-allocate batch slice for optimal performance
-	batch := make([]*ExplodedArrayItem, 0, arraySize)
+	// 🚀 PHASE 3: OBJECT POOL OPTIMIZATION - Get slice from pool
+	batch := explodedItemSlicePool.Get().([]*ExplodedArrayItem)
+	batch = batch[:0] // Reset length while keeping capacity
+
+	// Ensure we have enough capacity, grow if needed
+	if cap(batch) < arraySize {
+		batch = make([]*ExplodedArrayItem, 0, arraySize)
+	}
 
 	// Build batch of items to process
 	for i := 0; i < arraySize; i++ {
@@ -106,7 +153,17 @@ func (s *KafkaSinker) handleWithFieldExplosion(ctx context.Context, data *pbsubs
 	}
 
 	// Process the entire batch efficiently
-	return s.processBatchedArrayItems(batch)
+	err = s.processBatchedArrayItems(batch)
+
+	// 🚀 PHASE 3: Return slice to pool for reuse
+	// Clear references to prevent memory leaks
+	for i := range batch {
+		batch[i] = nil
+	}
+	batch = batch[:0] // Reset length
+	explodedItemSlicePool.Put(batch)
+
+	return err
 }
 
 // processBatchedArrayItems efficiently processes a batch of array items using parallel worker pool
@@ -158,7 +215,7 @@ func (s *KafkaSinker) calculateOptimalWorkerCount(batchSize int) int {
 	return workerCount
 }
 
-// processParallelBatch processes a large batch using worker pool pattern
+// processParallelBatch processes a large batch using worker pool pattern with memory optimization
 func (s *KafkaSinker) processParallelBatch(batch []*ExplodedArrayItem, workerCount int, startTime time.Time) error {
 	batchSize := len(batch)
 
@@ -166,8 +223,19 @@ func (s *KafkaSinker) processParallelBatch(batch []*ExplodedArrayItem, workerCou
 	jobs := make(chan SerializationJob, batchSize)
 	results := make(chan SerializationResult, batchSize)
 
-	// Pre-allocate results slice with proper ordering
-	batchMessages := make([]*BatchedKafkaMessage, batchSize)
+	// 🚀 PHASE 3: OBJECT POOL OPTIMIZATION - Get slice from pool
+	batchMessages := batchedMessageSlicePool.Get().([]*BatchedKafkaMessage)
+	batchMessages = batchMessages[:0] // Reset length while keeping capacity
+
+	// Ensure we have enough capacity, grow if needed
+	if cap(batchMessages) < batchSize {
+		batchMessages = make([]*BatchedKafkaMessage, batchSize)
+	} else {
+		// Extend slice to required length
+		for len(batchMessages) < batchSize {
+			batchMessages = append(batchMessages, nil)
+		}
+	}
 
 	// Start worker goroutines
 	var wg sync.WaitGroup
@@ -195,8 +263,16 @@ func (s *KafkaSinker) processParallelBatch(batch []*ExplodedArrayItem, workerCou
 		close(results)
 	}()
 
+	// 🚀 PHASE 3: OBJECT POOL OPTIMIZATION - Get error slice from pool
+	processingErrors := errorSlicePool.Get().([]error)
+	processingErrors = processingErrors[:0] // Reset length while keeping capacity
+	defer func() {
+		// Return error slice to pool
+		processingErrors = processingErrors[:0]
+		errorSlicePool.Put(processingErrors)
+	}()
+
 	// Collect results in order
-	var processingErrors []error
 	for i := 0; i < batchSize; i++ {
 		result := <-results
 		if result.Error != nil {
@@ -217,9 +293,22 @@ func (s *KafkaSinker) processParallelBatch(batch []*ExplodedArrayItem, workerCou
 	productionStart := time.Now()
 	err := s.produceBatchMessages(batchMessages)
 	if err != nil {
+		// Clean up and return slice to pool before error return
+		for i := range batchMessages {
+			batchMessages[i] = nil
+		}
+		batchMessages = batchMessages[:0]
+		batchedMessageSlicePool.Put(batchMessages)
 		return fmt.Errorf("failed to produce batch messages: %w", err)
 	}
 	productionTime := time.Since(productionStart)
+
+	// 🚀 PHASE 3: Clean up and return slice to pool
+	for i := range batchMessages {
+		batchMessages[i] = nil
+	}
+	batchMessages = batchMessages[:0]
+	batchedMessageSlicePool.Put(batchMessages)
 
 	s.logger.Debug("Parallel batch processing completed",
 		zap.Int("batch_size", batchSize),
@@ -232,16 +321,22 @@ func (s *KafkaSinker) processParallelBatch(batch []*ExplodedArrayItem, workerCou
 	return nil
 }
 
-// processSequentialBatch processes smaller batches sequentially for efficiency
+// processSequentialBatch processes smaller batches sequentially for efficiency with memory optimization
 func (s *KafkaSinker) processSequentialBatch(batch []*ExplodedArrayItem, startTime time.Time) error {
 	batchSize := len(batch)
 
-	// 🚀 PERFORMANCE: Pre-allocate slice for batch messages to avoid repeated allocations
-	batchMessages := make([]*BatchedKafkaMessage, 0, batchSize)
+	// 🚀 PHASE 3: OBJECT POOL OPTIMIZATION - Get slice from pool
+	batchMessages := batchedMessageSlicePool.Get().([]*BatchedKafkaMessage)
+	batchMessages = batchMessages[:0] // Reset length while keeping capacity
 
-	// Pre-allocate string builder for efficient key generation (avoids fmt.Sprintf allocations)
-	var keyBuilder strings.Builder
-	keyBuilder.Grow(64) // Pre-allocate reasonable buffer size
+	// Ensure we have enough capacity, grow if needed
+	if cap(batchMessages) < batchSize {
+		batchMessages = make([]*BatchedKafkaMessage, 0, batchSize)
+	}
+
+	// 🚀 PHASE 3: OBJECT POOL OPTIMIZATION - Get string builder from pool
+	keyBuilder := stringBuilderPool.Get().(*strings.Builder)
+	keyBuilder.Reset() // Reset the builder
 
 	// Pre-allocate dynamic message for schema-registry to avoid repeated allocations
 	var reusableMsg *dynamicpb.Message
@@ -260,7 +355,7 @@ func (s *KafkaSinker) processSequentialBatch(batch []*ExplodedArrayItem, startTi
 
 	// Serialize all items in the batch
 	for _, item := range batch {
-		// 🚀 OPTIMIZED KEY GENERATION: Use string builder instead of fmt.Sprintf
+		// 🚀 OPTIMIZED KEY GENERATION: Use pooled string builder instead of fmt.Sprintf
 		keyBuilder.Reset()
 		keyBuilder.WriteString("block_")
 		keyBuilder.WriteString(strconv.FormatUint(item.BlockData.Clock.Number, 10))
@@ -273,6 +368,13 @@ func (s *KafkaSinker) processSequentialBatch(batch []*ExplodedArrayItem, startTi
 		// Serialize the array item based on output format
 		messageBytes, err := s.serializeBatchedArrayItem(item, reusableMsg)
 		if err != nil {
+			// Clean up pools before error return
+			stringBuilderPool.Put(keyBuilder)
+			for i := range batchMessages {
+				batchMessages[i] = nil
+			}
+			batchMessages = batchMessages[:0]
+			batchedMessageSlicePool.Put(batchMessages)
 			return fmt.Errorf("failed to serialize batch item %d: %w", item.Index, err)
 		}
 
@@ -290,9 +392,24 @@ func (s *KafkaSinker) processSequentialBatch(batch []*ExplodedArrayItem, startTi
 	productionStart := time.Now()
 	err := s.produceBatchMessages(batchMessages)
 	if err != nil {
+		// Clean up pools before error return
+		stringBuilderPool.Put(keyBuilder)
+		for i := range batchMessages {
+			batchMessages[i] = nil
+		}
+		batchMessages = batchMessages[:0]
+		batchedMessageSlicePool.Put(batchMessages)
 		return fmt.Errorf("failed to produce batch messages: %w", err)
 	}
 	productionTime := time.Since(productionStart)
+
+	// 🚀 PHASE 3: Clean up and return objects to pools
+	stringBuilderPool.Put(keyBuilder)
+	for i := range batchMessages {
+		batchMessages[i] = nil
+	}
+	batchMessages = batchMessages[:0]
+	batchedMessageSlicePool.Put(batchMessages)
 
 	s.logger.Debug("Sequential batch processing completed",
 		zap.Int("batch_size", batchSize),
@@ -304,20 +421,20 @@ func (s *KafkaSinker) processSequentialBatch(batch []*ExplodedArrayItem, startTi
 	return nil
 }
 
-// serializationWorker processes serialization jobs in parallel following StreamingFast worker pool pattern
+// serializationWorker processes serialization jobs in parallel with object pool optimization
 func (s *KafkaSinker) serializationWorker(wg *sync.WaitGroup, jobs <-chan SerializationJob, results chan<- SerializationResult) {
 	defer wg.Done()
 
-	// Pre-allocate string builder per worker for efficient key generation
-	var keyBuilder strings.Builder
-	keyBuilder.Grow(64)
+	// 🚀 PHASE 3: OBJECT POOL OPTIMIZATION - Get string builder from pool per worker
+	keyBuilder := stringBuilderPool.Get().(*strings.Builder)
+	defer stringBuilderPool.Put(keyBuilder) // Return to pool when worker finishes
 
 	// Pre-allocate dynamic message per worker for schema-registry to avoid contention
 	var reusableMsg *dynamicpb.Message
 	var individualMsgDesc protoreflect.MessageDescriptor
 
 	for job := range jobs {
-		// 🚀 OPTIMIZED KEY GENERATION: Use string builder instead of fmt.Sprintf
+		// 🚀 OPTIMIZED KEY GENERATION: Use pooled string builder instead of fmt.Sprintf
 		keyBuilder.Reset()
 		keyBuilder.WriteString("block_")
 		keyBuilder.WriteString(strconv.FormatUint(job.Item.BlockData.Clock.Number, 10))
