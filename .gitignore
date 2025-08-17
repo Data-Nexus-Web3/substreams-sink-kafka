@@ -59,7 +59,7 @@ coverage.txt
 coverage.html
 
 # Cursor
-.cursor_examples
+.cursor_example/
 
 # Extras
 docker/connectors
