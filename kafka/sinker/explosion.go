@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
-	sink "github.com/streamingfast/substreams-sink"
 	pbkafka "github.com/streamingfast/substreams-sink-kafka/proto/sf/substreams/sink/kafka/v1"
 	pbsubstreamsrpc "github.com/streamingfast/substreams/pb/sf/substreams/rpc/v2"
+	sink "github.com/streamingfast/substreams/sink"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -119,12 +119,6 @@ func (s *KafkaSinker) handleWithFieldExplosion(ctx context.Context, data *pbsubs
 	// Get the array value
 	listValue := dynamicMessage.Get(field).List()
 	arraySize := listValue.Len()
-
-	s.logger.Info("Exploding array field",
-		zap.String("field_name", s.explodeFieldName),
-		zap.Int("array_size", arraySize),
-		zap.Uint64("block_number", data.Clock.Number),
-	)
 
 	// Early return for empty arrays
 	if arraySize == 0 {
@@ -666,13 +660,6 @@ func (s *KafkaSinker) produceExplodedArrayItem(item protoreflect.Value, field pr
 	atomic.AddInt64(&s.messagesProduced, 1)
 	atomic.AddInt64(&s.messagesPending, 1)
 
-	s.logger.Debug("Produced exploded array item",
-		zap.String("topic", s.topic),
-		zap.String("key", key),
-		zap.Int("array_index", index),
-		zap.Int("message_size", len(messageBytes)),
-	)
-
 	return nil
 }
 
@@ -849,12 +836,6 @@ func (s *KafkaSinker) produceExplodedMessage(explosion *ExplodedMessage) error {
 	// Update metrics
 	atomic.AddInt64(&s.messagesProduced, 1)
 	atomic.AddInt64(&s.messagesPending, 1)
-
-	s.logger.Debug("Produced exploded message",
-		zap.String("topic", explosion.Topic),
-		zap.String("key", explosion.Key),
-		zap.Int("message_size", len(explosion.MessageBytes)),
-	)
 
 	return nil
 }

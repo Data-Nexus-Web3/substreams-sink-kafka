@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/streamingfast/substreams-sink"
+	"github.com/streamingfast/substreams/sink"
 )
 
 func (s *KafkaSinker) loadCursor() (*sink.Cursor, error) {
@@ -46,4 +46,4 @@ func (s *KafkaSinker) saveCursor(cursor *sink.Cursor) error {
 	}
 
 	return nil
-} 
+}

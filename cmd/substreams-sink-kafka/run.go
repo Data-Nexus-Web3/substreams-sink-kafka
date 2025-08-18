@@ -8,16 +8,16 @@ import (
 	"github.com/spf13/pflag"
 	. "github.com/streamingfast/cli"
 	"github.com/streamingfast/cli/sflags"
-	sink "github.com/streamingfast/substreams-sink"
 	kafkaSinker "github.com/streamingfast/substreams-sink-kafka/kafka/sinker"
 	"github.com/streamingfast/substreams/manifest"
+	sink "github.com/streamingfast/substreams/sink"
 	"go.uber.org/zap"
 )
 
 var sinkRunCmd = Command(sinkRunE,
-	"run <kafka_brokers> <manifest> [<start>:<stop>]",
+	"run <kafka_brokers> <manifest>",
 	"Runs Kafka sink process",
-	RangeArgs(2, 3),
+	ExactArgs(2),
 	Flags(func(flags *pflag.FlagSet) {
 		sink.AddFlagsToSet(flags)
 		addKafkaFlags(flags)
@@ -35,7 +35,6 @@ func addKafkaFlags(flags *pflag.FlagSet) {
 	flags.Int("kafka-batch-size", 1000, "Maximum number of messages to batch before sending")
 	flags.Int("kafka-batch-timeout-ms", 100, "Maximum time to wait for batch to fill (milliseconds)")
 	flags.String("cursor-file", "cursor.txt", "File to store cursor for checkpoint recovery")
-	flags.StringP("endpoint", "e", "", "Specify the substreams endpoint, ex: `mainnet.eth.streamingfast.io:443`")
 	flags.String("output-module", "", "Name of the substreams module to consume (if not specified, will try to infer from manifest)")
 
 	// Output format selection
@@ -53,14 +52,10 @@ func addKafkaFlags(flags *pflag.FlagSet) {
 func sinkRunE(cmd *cobra.Command, args []string) error {
 	app := NewApplication(cmd.Context())
 
-	sink.RegisterMetrics()
+	// Metrics are automatically registered in the new sink package
 
 	kafkaBrokers := args[0]
 	manifestPath := args[1]
-	blockRange := ""
-	if len(args) > 2 {
-		blockRange = args[2]
-	}
 
 	endpoint := sflags.MustGetString(cmd, "endpoint")
 	if endpoint == "" {
@@ -103,10 +98,9 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 	sinker, err := sink.NewFromViper(
 		cmd,
 		supportedOutputTypes,
-		endpoint,
 		manifestPath,
 		outputModuleName,
-		blockRange,
+		"substreams-sink-kafka",
 		zlog,
 		tracer,
 	)

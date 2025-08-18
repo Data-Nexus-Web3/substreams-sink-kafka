@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
-	sink "github.com/streamingfast/substreams-sink"
+	sink "github.com/streamingfast/substreams/sink"
 	"go.uber.org/zap"
 )
 
