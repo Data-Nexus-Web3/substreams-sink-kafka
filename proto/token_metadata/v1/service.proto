@@ -1,0 +1,84 @@
+syntax = "proto3";
+
+package token_metadata.v1;
+
+option go_package = "github.com/streamingfast/substreams-sink-kafka/proto/token_metadata/v1;tokenmetadatav1";
+
+// TokenMetadataService provides high-performance token metadata lookups
+// with fork-aware blockchain state management
+service TokenMetadataService {
+  // Batch lookup of token metadata at a specific block
+  rpc BatchGetTokenMetadata(BatchTokenRequest) returns (BatchTokenResponse);
+  
+  // Single token lookup (for testing/debugging)
+  rpc GetTokenMetadata(TokenRequest) returns (TokenResponse);
+  
+  // Normalize raw token amounts to formatted strings
+  rpc BatchNormalizeTokenAmounts(BatchNormalizeRequest) returns (BatchNormalizeResponse);
+  
+  // Health check endpoint
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+message BatchTokenRequest {
+  uint64 block_number = 1;
+  repeated string token_addresses = 2; // Ethereum addresses (0x...)
+}
+
+message BatchTokenResponse {
+  map<string, TokenMetadata> tokens = 1; // address -> metadata
+  repeated string not_found = 2; // addresses that weren't found
+}
+
+message TokenRequest {
+  uint64 block_number = 1;
+  string token_address = 2;
+}
+
+message TokenResponse {
+  TokenMetadata token = 1;
+  bool found = 2;
+}
+
+message TokenMetadata {
+  string address = 1;           // Contract address
+  uint32 decimals = 2;          // Token decimals (usually 18)
+  string symbol = 3;            // Token symbol (e.g., "USDC") - up to 64 chars
+  string name = 4;              // Token name (e.g., "USD Coin") - up to 512 chars
+  uint64 valid_from_block = 5;  // Block when token was created
+  uint64 valid_to_block = 6;    // Block when token was upgraded (0 = current)
+}
+
+message BatchNormalizeRequest {
+  uint64 block_number = 1;
+  repeated TokenAmountPair amounts = 2;
+}
+
+message TokenAmountPair {
+  string token_address = 1;
+  string raw_amount = 2;        // Raw uint256 as string
+}
+
+message BatchNormalizeResponse {
+  repeated NormalizedAmount normalized = 1;
+}
+
+message NormalizedAmount {
+  string token_address = 1;
+  string raw_amount = 2;
+  string formatted_amount = 3;  // Decimal formatted amount
+  bool success = 4;
+  string error = 5;             // Error message if success=false
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  enum Status {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+  }
+  Status status = 1;
+  string message = 2;
+}

@@ -193,12 +193,66 @@ func SinkerFactory(baseSinker *sink.Sinker, options SinkerFactoryOptions) func(c
 			// Simple explosion configuration for array field handling
 			explodeFieldName: options.ExplodeField,
 
+			// Token normalization configuration
+			tokenValueFields:         options.TokenValueFields,
+			tokenAddressFields:       options.TokenAddressFields,
+			enableTokenNormalization: options.TokenMetadataEndpoint != "",
+
 			// Initialize high-performance async system
 			deliveryChan:      make(chan kafka.Event, 10000), // Large buffer for delivery events
 			pendingMessages:   make(map[string]*sink.Cursor),
 			confirmedMessages: make(chan string, 10000),        // Buffer for confirmed message keys
 			cursorSaveTicker:  time.NewTicker(1 * time.Second), // Save cursor every second
 			lastStatsTime:     time.Now(),
+		}
+
+		// Initialize field processing configuration
+		fieldConfig := DefaultFieldProcessingConfig()
+		fieldConfig.OmitEmptyStrings = options.OmitEmptyStrings
+
+		// Set up token source fields priority
+		if len(options.TokenSourceFields) > 0 {
+			fieldConfig.DefaultTokenSourceFields = options.TokenSourceFields
+		}
+
+		kafkaSinker.fieldProcessingConfig = fieldConfig
+
+		// Set debug mode
+		kafkaSinker.debugMode = options.DebugMode
+
+		// Set output formatting options
+		kafkaSinker.hexEncodeBytes = options.HexEncodeBytes
+
+		// Initialize mutation statistics
+		kafkaSinker.mutationStats = NewMutationStats()
+
+		// Initialize token metadata injection rules
+		var tokenMetadataRules []*TokenMetadataInjectionRule
+		for _, fieldName := range options.TokenMetadataFields {
+			rule := &TokenMetadataInjectionRule{
+				TargetField:       fieldName,
+				TokenSourceFields: options.TokenSourceFields,
+			}
+			tokenMetadataRules = append(tokenMetadataRules, rule)
+		}
+		kafkaSinker.tokenMetadataRules = tokenMetadataRules
+
+		// Initialize token normalizer if enabled
+		if options.TokenMetadataEndpoint != "" {
+			tokenNormalizer, err := NewTokenNormalizer(options.TokenMetadataEndpoint, logger)
+			if err != nil {
+				return nil, fmt.Errorf("failed to initialize token normalizer: %w", err)
+			}
+			kafkaSinker.tokenNormalizer = tokenNormalizer
+
+			logger.Info("Token normalization and metadata injection enabled",
+				zap.String("grpc_endpoint", options.TokenMetadataEndpoint),
+				zap.Strings("value_fields", options.TokenValueFields),
+				zap.Strings("address_fields", options.TokenAddressFields),
+				zap.Strings("metadata_fields", options.TokenMetadataFields),
+				zap.Strings("source_fields", options.TokenSourceFields),
+				zap.Bool("omit_empty_strings", options.OmitEmptyStrings),
+			)
 		}
 
 		// Start background delivery confirmation handler

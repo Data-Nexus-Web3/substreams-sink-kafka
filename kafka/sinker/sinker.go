@@ -44,6 +44,26 @@ type KafkaSinker struct {
 	// Simple explosion configuration for array field handling
 	explodeFieldName string // field name to explode (empty means no explosion)
 
+	// Token normalization configuration (optional feature)
+	tokenNormalizer          *TokenNormalizer          // nil if disabled
+	optimizedNormalizer      *OptimizedTokenNormalizer // nil if disabled
+	tokenValueFields         []string                  // Field names containing raw token amounts
+	tokenAddressFields       []string                  // Field names containing token contract addresses
+	enableTokenNormalization bool                      // Whether token normalization is enabled
+
+	// Dynamic field processing configuration
+	fieldProcessingConfig *FieldProcessingConfig        // Configuration for field annotations and processing
+	tokenMetadataRules    []*TokenMetadataInjectionRule // Rules for injecting token metadata
+
+	// Debug configuration
+	debugMode bool // Enable debug logging
+
+	// Output formatting configuration
+	hexEncodeBytes bool // Encode byte fields as hex strings
+
+	// Statistics tracking
+	mutationStats *MutationStats // Mutation performance statistics
+
 	// High-performance async delivery tracking
 	deliveryChan        chan kafka.Event
 	pendingMessages     map[string]*sink.Cursor // message key -> cursor
@@ -94,6 +114,28 @@ type SinkerFactoryOptions struct {
 
 	// Simple explosion option for array field handling
 	ExplodeField string // field name to explode (empty means no explosion)
+
+	// Token normalization options (optional feature)
+	TokenMetadataEndpoint string   // GRPC endpoint for token metadata service (empty = disabled)
+	TokenValueFields      []string // Field names containing raw token amounts
+	TokenAddressFields    []string // Field names containing token contract addresses
+
+	// Dynamic field processing options
+	TokenMetadataFields []string // Field names to inject token metadata into
+	TokenSourceFields   []string // Priority-ordered token source fields (e.g., ["ops_token", "act_address"])
+	OmitEmptyStrings    bool     // Whether to omit empty string fields from output
+
+	// Debug options
+	DebugMode bool // Enable debug logging
+
+	// Performance profiling options
+	EnableProfiling     bool   // Enable performance profiling
+	EnableOptimizations bool   // Enable performance optimizations
+	ProfilingOutputDir  string // Directory for profiling output files
+	ProfilingHTTPPort   int    // Port for pprof HTTP server for detailed processing information
+
+	// Output formatting options
+	HexEncodeBytes bool // Encode byte fields as hex strings with 0x prefix
 }
 
 // Global variables for async delivery system

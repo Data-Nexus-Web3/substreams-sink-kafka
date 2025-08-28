@@ -47,6 +47,30 @@ func addKafkaFlags(flags *pflag.FlagSet) {
 
 	// Simple explosion flag for array field handling
 	flags.String("explode-field", "", "Field name to explode (must be an array field). Each array item becomes a separate message.")
+
+	// Token normalization flags (optional feature)
+	flags.String("token-metadata-grpc-endpoint", "", "Token metadata GRPC service endpoint (e.g., localhost:9090) - enables token normalization")
+	flags.StringSlice("token-value-fields", []string{}, "Comma-separated list of field names containing raw token amounts to normalize. Supports nested fields with dot notation (e.g., amount,relatedOperations.amount)")
+	flags.StringSlice("token-address-fields", []string{}, "Comma-separated list of field names containing token contract addresses. Supports nested fields with dot notation (e.g., token_address,relatedOperations.token)")
+
+	// Dynamic field processing flags
+	flags.StringSlice("token-metadata-fields", []string{}, "Comma-separated list of field names to inject token metadata into (e.g., token_metadata)")
+	flags.StringSlice("token-source-fields", []string{"ops_token", "act_address", "token_address"}, "Priority-ordered list of fields to check for token addresses")
+	flags.Bool("omit-empty-strings", true, "Omit empty string fields from output messages")
+
+	// Debug flags
+	flags.Bool("debug", false, "Enable debug logging (shows detailed processing information)")
+
+	// Performance profiling flags
+	flags.Bool("enable-profiling", false, "Enable performance profiling and detailed metrics")
+	flags.Bool("enable-optimizations", true, "Enable performance optimizations for token normalization")
+	flags.String("profiling-output-dir", "./profiles", "Directory for profiling output files")
+	flags.Int("profiling-http-port", 6060, "Port for pprof HTTP server (use 0 to disable)")
+
+
+
+	// Output formatting flags
+	flags.Bool("hex-encode-bytes", false, "Encode byte fields as hex strings with 0x prefix (default: raw bytes)")
 }
 
 func sinkRunE(cmd *cobra.Command, args []string) error {
@@ -137,6 +161,28 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 	// Get explosion configuration from flags
 	explodeField := sflags.MustGetString(cmd, "explode-field")
 
+	// Get token normalization configuration from flags
+	tokenMetadataEndpoint := sflags.MustGetString(cmd, "token-metadata-grpc-endpoint")
+	tokenValueFields := sflags.MustGetStringSlice(cmd, "token-value-fields")
+	tokenAddressFields := sflags.MustGetStringSlice(cmd, "token-address-fields")
+
+	// Get dynamic field processing configuration from flags
+	tokenMetadataFields := sflags.MustGetStringSlice(cmd, "token-metadata-fields")
+	tokenSourceFields := sflags.MustGetStringSlice(cmd, "token-source-fields")
+	omitEmptyStrings := sflags.MustGetBool(cmd, "omit-empty-strings")
+
+	// Get debug configuration
+	debugMode := sflags.MustGetBool(cmd, "debug")
+
+	// Get profiling configuration
+	enableProfiling := sflags.MustGetBool(cmd, "enable-profiling")
+	enableOptimizations := sflags.MustGetBool(cmd, "enable-optimizations")
+	profilingOutputDir := sflags.MustGetString(cmd, "profiling-output-dir")
+	profilingHTTPPort := sflags.MustGetInt(cmd, "profiling-http-port")
+
+	// Get output formatting configuration
+	hexEncodeBytes := sflags.MustGetBool(cmd, "hex-encode-bytes")
+
 	// Validate Schema Registry configuration for schema-registry format
 	if outputFormat == "schema-registry" && schemaRegistryURL == "" {
 		return fmt.Errorf("--schema-registry-url is required when using --output-format=schema-registry")
@@ -144,6 +190,16 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 
 	// Validate explosion configuration
 	// No validation needed for explode-field - empty string means no explosion
+
+	// Validate token normalization configuration
+	if tokenMetadataEndpoint != "" {
+		if len(tokenValueFields) == 0 {
+			return fmt.Errorf("--token-value-fields is required when --token-metadata-grpc-endpoint is specified")
+		}
+		if len(tokenAddressFields) == 0 {
+			return fmt.Errorf("--token-address-fields is required when --token-metadata-grpc-endpoint is specified")
+		}
+	}
 
 	// Default schema subject based on output format
 	// For schema-registry with protobuf, Confluent auto-generates {topic}-value-value
@@ -160,6 +216,15 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 		zap.Int("batch_size", batchSize),
 		zap.String("output_format", outputFormat),
 		zap.String("explode_field", explodeField),
+	}
+
+	// Add token normalization logging if enabled
+	if tokenMetadataEndpoint != "" {
+		logFields = append(logFields,
+			zap.String("token_metadata_endpoint", tokenMetadataEndpoint),
+			zap.Strings("token_value_fields", tokenValueFields),
+			zap.Strings("token_address_fields", tokenAddressFields),
+		)
 	}
 
 	if outputFormat == "schema-registry" {
@@ -189,6 +254,28 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 		SchemaSubject:      schemaSubject,
 		SchemaAutoRegister: schemaAutoRegister,
 		ExplodeField:       explodeField,
+
+		// Token normalization options
+		TokenMetadataEndpoint: tokenMetadataEndpoint,
+		TokenValueFields:      tokenValueFields,
+		TokenAddressFields:    tokenAddressFields,
+
+		// Dynamic field processing options
+		TokenMetadataFields: tokenMetadataFields,
+		TokenSourceFields:   tokenSourceFields,
+		OmitEmptyStrings:    omitEmptyStrings,
+
+		// Debug options
+		DebugMode: debugMode,
+
+		// Performance profiling options
+		EnableProfiling:     enableProfiling,
+		EnableOptimizations: enableOptimizations,
+		ProfilingOutputDir:  profilingOutputDir,
+		ProfilingHTTPPort:   profilingHTTPPort,
+
+		// Output formatting options
+		HexEncodeBytes: hexEncodeBytes,
 	})
 
 	kafkaSink, err := sinkerFactory(app.Context(), zlog, tracer)

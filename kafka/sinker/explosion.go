@@ -2,6 +2,7 @@ package sinker
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	pbkafka "github.com/streamingfast/substreams-sink-kafka/proto/sf/substreams/sink/kafka/v1"
+	tokenmetadatav1 "github.com/streamingfast/substreams-sink-kafka/proto/token_metadata/v1"
 	pbsubstreamsrpc "github.com/streamingfast/substreams/pb/sf/substreams/rpc/v2"
 	sink "github.com/streamingfast/substreams/sink"
 	"go.uber.org/zap"
@@ -79,9 +81,10 @@ type BatchedKafkaMessage struct {
 
 // SerializationJob represents work to be done by worker pool
 type SerializationJob struct {
-	Item   *ExplodedArrayItem
-	Index  int
-	Result chan SerializationResult
+	Item                    *ExplodedArrayItem
+	Index                   int
+	Result                  chan SerializationResult
+	PreFetchedTokenMetadata map[string]*tokenmetadatav1.TokenMetadata // Pre-fetched token metadata for batch
 }
 
 // SerializationResult represents the result of a serialization job
@@ -98,7 +101,9 @@ func (s *KafkaSinker) handleWithFieldExplosion(ctx context.Context, data *pbsubs
 		zap.Uint64("block_number", data.Clock.Number),
 	)
 
-	// Deserialize the main message using dynamic protobuf
+	// Note: Mutations are now applied to individual exploded items in serializeBatchedArrayItem()
+
+	// Deserialize the main message using dynamic protobuf (now with mutations applied)
 	dynamicMessage := dynamicpb.NewMessage(s.v2MessageDescriptor)
 	err := proto.Unmarshal(data.Output.MapOutput.Value, dynamicMessage)
 	if err != nil {
@@ -146,8 +151,19 @@ func (s *KafkaSinker) handleWithFieldExplosion(ctx context.Context, data *pbsubs
 		batch = append(batch, item)
 	}
 
+	// 🚀 PERFORMANCE OPTIMIZATION: Pre-fetch all token metadata for the entire batch
+	var batchTokenMetadata map[string]*tokenmetadatav1.TokenMetadata
+	if s.tokenNormalizer != nil && len(s.tokenValueFields) > 0 {
+		var metadataErr error
+		batchTokenMetadata, metadataErr = s.preFetchBatchTokenMetadata(batch)
+		if metadataErr != nil {
+			s.logger.Warn("Failed to pre-fetch batch token metadata", zap.Error(metadataErr))
+			// Continue without token normalization rather than failing
+		}
+	}
+
 	// Process the entire batch efficiently
-	err = s.processBatchedArrayItems(batch)
+	err = s.processBatchedArrayItemsWithMetadata(batch, batchTokenMetadata)
 
 	// 🚀 PHASE 3: Return slice to pool for reuse
 	// Clear references to prevent memory leaks
@@ -162,6 +178,11 @@ func (s *KafkaSinker) handleWithFieldExplosion(ctx context.Context, data *pbsubs
 
 // processBatchedArrayItems efficiently processes a batch of array items using parallel worker pool
 func (s *KafkaSinker) processBatchedArrayItems(batch []*ExplodedArrayItem) error {
+	return s.processBatchedArrayItemsWithMetadata(batch, nil)
+}
+
+// processBatchedArrayItemsWithMetadata efficiently processes a batch with pre-fetched token metadata
+func (s *KafkaSinker) processBatchedArrayItemsWithMetadata(batch []*ExplodedArrayItem, batchTokenMetadata map[string]*tokenmetadatav1.TokenMetadata) error {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -181,9 +202,9 @@ func (s *KafkaSinker) processBatchedArrayItems(batch []*ExplodedArrayItem) error
 
 	// Use parallel processing for larger batches, sequential for smaller ones
 	if batchSize >= 100 && workerCount > 1 {
-		return s.processParallelBatch(batch, workerCount, startTime)
+		return s.processParallelBatchWithMetadata(batch, workerCount, startTime, batchTokenMetadata)
 	} else {
-		return s.processSequentialBatch(batch, startTime)
+		return s.processSequentialBatchWithMetadata(batch, startTime, batchTokenMetadata)
 	}
 }
 
@@ -211,6 +232,11 @@ func (s *KafkaSinker) calculateOptimalWorkerCount(batchSize int) int {
 
 // processParallelBatch processes a large batch using worker pool pattern with memory optimization
 func (s *KafkaSinker) processParallelBatch(batch []*ExplodedArrayItem, workerCount int, startTime time.Time) error {
+	return s.processParallelBatchWithMetadata(batch, workerCount, startTime, nil)
+}
+
+// processParallelBatchWithMetadata processes a large batch with pre-fetched token metadata
+func (s *KafkaSinker) processParallelBatchWithMetadata(batch []*ExplodedArrayItem, workerCount int, startTime time.Time, batchTokenMetadata map[string]*tokenmetadatav1.TokenMetadata) error {
 	batchSize := len(batch)
 
 	// 🚀 WORKER POOL PATTERN: Following StreamingFast files sink approach
@@ -243,9 +269,10 @@ func (s *KafkaSinker) processParallelBatch(batch []*ExplodedArrayItem, workerCou
 		defer close(jobs)
 		for i, item := range batch {
 			job := SerializationJob{
-				Item:   item,
-				Index:  i,
-				Result: results,
+				Item:                    item,
+				Index:                   i,
+				Result:                  results,
+				PreFetchedTokenMetadata: batchTokenMetadata,
 			}
 			jobs <- job
 		}
@@ -317,6 +344,11 @@ func (s *KafkaSinker) processParallelBatch(batch []*ExplodedArrayItem, workerCou
 
 // processSequentialBatch processes smaller batches sequentially for efficiency with memory optimization
 func (s *KafkaSinker) processSequentialBatch(batch []*ExplodedArrayItem, startTime time.Time) error {
+	return s.processSequentialBatchWithMetadata(batch, startTime, nil)
+}
+
+// processSequentialBatchWithMetadata processes smaller batches with pre-fetched token metadata
+func (s *KafkaSinker) processSequentialBatchWithMetadata(batch []*ExplodedArrayItem, startTime time.Time, batchTokenMetadata map[string]*tokenmetadatav1.TokenMetadata) error {
 	batchSize := len(batch)
 
 	// 🚀 PHASE 3: OBJECT POOL OPTIMIZATION - Get slice from pool
@@ -360,7 +392,7 @@ func (s *KafkaSinker) processSequentialBatch(batch []*ExplodedArrayItem, startTi
 		key := keyBuilder.String()
 
 		// Serialize the array item based on output format
-		messageBytes, err := s.serializeBatchedArrayItem(item, reusableMsg)
+		messageBytes, err := s.serializeBatchedArrayItemWithMetadata(item, reusableMsg, batchTokenMetadata)
 		if err != nil {
 			// Clean up pools before error return
 			stringBuilderPool.Put(keyBuilder)
@@ -445,7 +477,7 @@ func (s *KafkaSinker) serializationWorker(wg *sync.WaitGroup, jobs <-chan Serial
 		}
 
 		// Serialize the array item
-		messageBytes, err := s.serializeBatchedArrayItem(job.Item, reusableMsg)
+		messageBytes, err := s.serializeBatchedArrayItemWithMetadata(job.Item, reusableMsg, job.PreFetchedTokenMetadata)
 
 		result := SerializationResult{
 			Index: job.Index,
@@ -467,11 +499,31 @@ func (s *KafkaSinker) serializationWorker(wg *sync.WaitGroup, jobs <-chan Serial
 
 // serializeBatchedArrayItem serializes a single array item using optimized patterns
 func (s *KafkaSinker) serializeBatchedArrayItem(item *ExplodedArrayItem, reusableMsg *dynamicpb.Message) ([]byte, error) {
+	return s.serializeBatchedArrayItemWithMetadata(item, reusableMsg, nil)
+}
+
+// serializeBatchedArrayItemWithMetadata serializes a single array item with pre-fetched token metadata
+func (s *KafkaSinker) serializeBatchedArrayItemWithMetadata(item *ExplodedArrayItem, reusableMsg *dynamicpb.Message, preFetchedTokenMetadata map[string]*tokenmetadatav1.TokenMetadata) ([]byte, error) {
 	switch s.outputFormat {
 	case "json":
-		// Convert the array item to a JSON-serializable value and serialize
-		itemValue := s.convertProtoreflectValue(item.Value)
-		return json.Marshal(itemValue)
+		// 🎯 APPLY MUTATIONS TO INDIVIDUAL EXPLODED ITEM
+		// This is where the actual fields like ops_token, ops_amount exist
+		mutatedValue, err := s.applyMutationsToExplodedItemWithMetadata(item, preFetchedTokenMetadata)
+		if err != nil {
+			s.logger.Warn("Failed to apply mutations to exploded item", zap.Error(err))
+			// Fall back to original value
+			mutatedValue = s.convertProtoreflectValue(item.Value)
+		}
+
+		jsonBytes, err := json.Marshal(mutatedValue)
+		if err != nil {
+			return nil, err
+		}
+
+		// Token normalization already applied upstream in applyUpstreamMutations()
+		// Exploded items inherit the mutations from the parent message
+
+		return jsonBytes, nil
 
 	case "protobuf":
 		// For protobuf, serialize the message directly if it's a message type
@@ -956,6 +1008,34 @@ func (s *KafkaSinker) extractFieldValue(message protoreflect.Message, fieldPath 
 	return nil
 }
 
+// convertProtoreflectValueWithField converts a protoreflect.Value to a Go interface{} with field context for enum handling
+func (s *KafkaSinker) convertProtoreflectValueWithField(value protoreflect.Value, field protoreflect.FieldDescriptor) interface{} {
+	// Debug logging to see what type we're dealing with
+	if s.debugMode {
+		s.logger.Debug("Converting protoreflect value with field context",
+			zap.String("field_name", string(field.Name())),
+			zap.String("field_kind", field.Kind().String()),
+			zap.String("type", fmt.Sprintf("%T", value.Interface())),
+			zap.String("value", value.String()))
+	}
+
+	// Check if this field is an enum
+	if field.Kind() == protoreflect.EnumKind {
+		// For enum fields, convert the numeric value to the enum name
+		enumValue := value.Enum()
+		enumDescriptor := field.Enum()
+		enumValueDescriptor := enumDescriptor.Values().ByNumber(enumValue)
+		if enumValueDescriptor != nil {
+			return string(enumValueDescriptor.Name())
+		}
+		// Fallback to numeric value if name not found
+		return int32(enumValue)
+	}
+
+	// For non-enum fields, use the regular conversion
+	return s.convertProtoreflectValue(value)
+}
+
 func (s *KafkaSinker) convertProtoreflectValue(value protoreflect.Value) interface{} {
 	// Check the actual type of the value using the interface
 	switch v := value.Interface().(type) {
@@ -976,7 +1056,16 @@ func (s *KafkaSinker) convertProtoreflectValue(value protoreflect.Value) interfa
 	case string:
 		return v
 	case []byte:
+		// Convert bytes based on configuration flag
+		if s.hexEncodeBytes {
+			// Convert bytes to hex string with 0x prefix (more readable than base64)
+			return "0x" + hex.EncodeToString(v)
+		}
+		// Return raw bytes (default behavior)
 		return v
+	case protoreflect.EnumNumber:
+		// Handle enums - convert to their string name (much more readable than numeric value)
+		return value.String()
 	case protoreflect.Message:
 		// For messages, convert to map
 		return s.convertMessageToMap(v)
@@ -989,19 +1078,9 @@ func (s *KafkaSinker) convertProtoreflectValue(value protoreflect.Value) interfa
 		}
 		return result
 	default:
-		// Try to handle other protoreflect types safely
-		if value.Message().IsValid() {
-			return s.convertMessageToMap(value.Message())
-		}
-		if value.List().IsValid() {
-			list := value.List()
-			result := make([]interface{}, list.Len())
-			for i := 0; i < list.Len(); i++ {
-				result[i] = s.convertProtoreflectValue(list.Get(i))
-			}
-			return result
-		}
-		return v
+		// Handle unknown types safely - avoid calling .Message() on non-message types
+		// This prevents panics when encountering enums or other types
+		return value.String()
 	}
 }
 
@@ -1012,8 +1091,260 @@ func (s *KafkaSinker) convertMessageToMap(message protoreflect.Message) map[stri
 	for i := 0; i < fields.Len(); i++ {
 		field := fields.Get(i)
 		value := message.Get(field)
-		result[string(field.Name())] = s.convertProtoreflectValue(value)
+		result[string(field.Name())] = s.convertProtoreflectValueWithField(value, field)
 	}
 
 	return result
+}
+
+// applyMutationsToExplodedItem applies mutations to an individual exploded array item
+func (s *KafkaSinker) applyMutationsToExplodedItem(item *ExplodedArrayItem) (interface{}, error) {
+	return s.applyMutationsToExplodedItemWithMetadata(item, nil)
+}
+
+// applyMutationsToExplodedItemWithMetadata applies mutations with pre-fetched token metadata
+func (s *KafkaSinker) applyMutationsToExplodedItemWithMetadata(item *ExplodedArrayItem, preFetchedTokenMetadata map[string]*tokenmetadatav1.TokenMetadata) (interface{}, error) {
+	// Convert the protoreflect.Value to a map for easier manipulation
+	itemMap := s.convertProtoreflectValue(item.Value)
+	itemMapTyped, ok := itemMap.(map[string]interface{})
+	if !ok {
+		s.logger.Warn("Exploded item is not a map, cannot apply mutations")
+		return itemMap, nil
+	}
+
+	if s.debugMode {
+		s.logger.Debug("Processing exploded item",
+			zap.Int("item_index", item.Index),
+			zap.Uint64("block_number", item.BlockData.Clock.Number),
+		)
+	}
+
+	// Apply token amount formatting
+	if s.tokenNormalizer != nil && len(s.tokenValueFields) > 0 {
+		if preFetchedTokenMetadata != nil {
+			// Use pre-fetched metadata for better performance
+			s.normalizeTokenFieldsInJSON(itemMapTyped, preFetchedTokenMetadata)
+		} else {
+			// Fallback to individual lookup (slower)
+			err := s.applyTokenFormattingToMap(itemMapTyped, item.BlockData.Clock.Number)
+			if err != nil {
+				s.logger.Warn("Token formatting failed for exploded item", zap.Error(err))
+			}
+		}
+	}
+
+	// Apply token metadata injection
+	if len(s.tokenMetadataRules) > 0 {
+		if preFetchedTokenMetadata != nil {
+			// Use pre-fetched metadata for better performance
+			s.applyTokenMetadataToMapWithMetadata(itemMapTyped, preFetchedTokenMetadata)
+		} else {
+			// Fallback to individual lookup (slower)
+			err := s.applyTokenMetadataToMap(itemMapTyped, item.BlockData.Clock.Number)
+			if err != nil {
+				s.logger.Warn("Token metadata injection failed for exploded item", zap.Error(err))
+			}
+		}
+	}
+
+	// Apply field filtering (omit empty strings)
+	if s.fieldProcessingConfig != nil && s.fieldProcessingConfig.OmitEmptyStrings {
+		s.filterEmptyFieldsFromMap(itemMapTyped)
+	}
+
+	return itemMapTyped, nil
+}
+
+// applyTokenFormattingToMap applies token amount formatting to a map representation
+func (s *KafkaSinker) applyTokenFormattingToMap(itemMap map[string]interface{}, blockNumber uint64) error {
+	// Use optimized normalizer if available
+	if s.optimizedNormalizer != nil {
+		return s.optimizedNormalizer.OptimizedNormalizeJSON(itemMap, blockNumber)
+	}
+
+	// Fallback to original implementation
+	// Extract unique token addresses using the same logic as JSON serialization
+	uniqueTokens := s.extractUniqueTokensFromJSON(itemMap, s.tokenAddressFields)
+	if len(uniqueTokens) == 0 {
+		return nil
+	}
+
+	// Get token metadata for all found tokens
+	ctx := context.Background()
+	tokenMetadata, err := s.tokenNormalizer.BatchGetTokenMetadata(ctx, blockNumber, uniqueTokens)
+	if err != nil {
+		return err
+	}
+
+	// Apply normalization using the same logic as JSON serialization
+	s.normalizeTokenFieldsInJSON(itemMap, tokenMetadata)
+	return nil
+}
+
+// applyTokenMetadataToMap applies token metadata injection to a map representation
+func (s *KafkaSinker) applyTokenMetadataToMap(itemMap map[string]interface{}, blockNumber uint64) error {
+	// Find token address using priority fields
+	var tokenAddress string
+	for _, fieldName := range s.fieldProcessingConfig.DefaultTokenSourceFields {
+		if addr, exists := itemMap[fieldName]; exists {
+			if addrStr, ok := addr.(string); ok && addrStr != "" {
+				tokenAddress = addrStr
+				break
+			}
+		}
+	}
+
+	if tokenAddress == "" {
+		return nil
+	}
+
+	// Get token metadata
+	ctx := context.Background()
+	tokenMetadata, err := s.tokenNormalizer.BatchGetTokenMetadata(ctx, blockNumber, []string{tokenAddress})
+	if err != nil {
+		return err
+	}
+
+	metadata, exists := tokenMetadata[tokenAddress]
+	if !exists {
+		return nil
+	}
+
+	// Inject metadata into configured fields
+	for _, rule := range s.tokenMetadataRules {
+		itemMap[rule.TargetField] = map[string]interface{}{
+			"address":        metadata.Address,
+			"decimals":       metadata.Decimals,
+			"symbol":         metadata.Symbol,
+			"name":           metadata.Name,
+			"validFromBlock": metadata.ValidFromBlock,
+		}
+
+		s.mutationStats.RecordTokenMetadataInjected()
+
+		if s.debugMode {
+			s.logger.Debug("Token metadata injected",
+				zap.String("target_field", rule.TargetField),
+				zap.String("token_address", tokenAddress),
+				zap.String("symbol", metadata.Symbol),
+			)
+		}
+	}
+
+	return nil
+}
+
+// filterEmptyFieldsFromMap removes empty string fields from a map
+func (s *KafkaSinker) filterEmptyFieldsFromMap(itemMap map[string]interface{}) {
+	for key, value := range itemMap {
+		if strValue, ok := value.(string); ok && strValue == "" {
+			delete(itemMap, key)
+			s.mutationStats.RecordEmptyFieldFiltered()
+		}
+	}
+}
+
+// preFetchBatchTokenMetadata pre-fetches all token metadata needed for a batch of items
+func (s *KafkaSinker) preFetchBatchTokenMetadata(batch []*ExplodedArrayItem) (map[string]*tokenmetadatav1.TokenMetadata, error) {
+	if len(batch) == 0 {
+		return nil, nil
+	}
+
+	// Collect all unique tokens from the entire batch
+	uniqueTokens := make(map[string]bool)
+	blockNumber := batch[0].BlockData.Clock.Number // All items in batch have same block number
+
+	for _, item := range batch {
+		// Convert item to map for token extraction
+		itemMap := s.convertProtoreflectValue(item.Value)
+		if itemMapTyped, ok := itemMap.(map[string]interface{}); ok {
+			// Extract tokens for NORMALIZATION (using tokenAddressFields)
+			normalizationTokens := s.extractUniqueTokensFromJSON(itemMapTyped, s.tokenAddressFields)
+			for _, token := range normalizationTokens {
+				uniqueTokens[token] = true
+			}
+
+			// Extract tokens for METADATA INJECTION (using DefaultTokenSourceFields)
+			if s.fieldProcessingConfig != nil && len(s.fieldProcessingConfig.DefaultTokenSourceFields) > 0 {
+				metadataTokens := s.extractUniqueTokensFromJSON(itemMapTyped, s.fieldProcessingConfig.DefaultTokenSourceFields)
+				for _, token := range metadataTokens {
+					uniqueTokens[token] = true
+				}
+			}
+		}
+	}
+
+	// Convert to slice
+	tokenList := make([]string, 0, len(uniqueTokens))
+	for token := range uniqueTokens {
+		tokenList = append(tokenList, token)
+	}
+
+	if len(tokenList) == 0 {
+		return nil, nil
+	}
+
+	// Single batch lookup for all tokens
+	ctx := context.Background()
+	tokenMetadata, err := s.tokenNormalizer.BatchGetTokenMetadata(ctx, blockNumber, tokenList)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.debugMode {
+		s.logger.Debug("Pre-fetched batch token metadata",
+			zap.Int("batch_size", len(batch)),
+			zap.Int("unique_tokens", len(tokenList)),
+			zap.Strings("tokens", tokenList),
+			zap.Strings("normalization_fields", s.tokenAddressFields),
+			zap.Strings("metadata_injection_fields", s.fieldProcessingConfig.DefaultTokenSourceFields),
+			zap.Uint64("block_number", blockNumber),
+		)
+	}
+
+	return tokenMetadata, nil
+}
+
+// applyTokenMetadataToMapWithMetadata applies token metadata injection using pre-fetched metadata
+func (s *KafkaSinker) applyTokenMetadataToMapWithMetadata(itemMap map[string]interface{}, preFetchedTokenMetadata map[string]*tokenmetadatav1.TokenMetadata) {
+	// Find token address using priority fields
+	var tokenAddress string
+	for _, fieldName := range s.fieldProcessingConfig.DefaultTokenSourceFields {
+		if addr, exists := itemMap[fieldName]; exists {
+			if addrStr, ok := addr.(string); ok && addrStr != "" {
+				tokenAddress = addrStr
+				break
+			}
+		}
+	}
+
+	if tokenAddress == "" {
+		return
+	}
+
+	// Use pre-fetched metadata
+	metadata, exists := preFetchedTokenMetadata[tokenAddress]
+	if !exists {
+		return
+	}
+
+	// Inject metadata into configured fields
+	for _, rule := range s.tokenMetadataRules {
+		itemMap[rule.TargetField] = map[string]interface{}{
+			"address":          metadata.Address,
+			"decimals":         metadata.Decimals,
+			"symbol":           metadata.Symbol,
+			"name":             metadata.Name,
+			"valid_from_block": metadata.ValidFromBlock,
+			"valid_to_block":   metadata.ValidToBlock,
+		}
+
+		if s.debugMode {
+			s.logger.Debug("Token metadata injected (pre-fetched)",
+				zap.String("target_field", rule.TargetField),
+				zap.String("token_address", tokenAddress),
+				zap.String("symbol", metadata.Symbol),
+			)
+		}
+	}
 }
