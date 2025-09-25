@@ -13,8 +13,18 @@ import (
 // applyUpstreamMutations applies all field mutations to the protobuf message before serialization
 // This ensures ALL output formats (json, protobuf, schema-registry) benefit from the mutations
 func (s *KafkaSinker) applyUpstreamMutations(ctx context.Context, protoBytes []byte, blockNumber uint64) ([]byte, error) {
+	// Always log this to see if the function is being called
+	s.logger.Info("DEBUG: applyUpstreamMutations called",
+		zap.Bool("debug_mode", s.debugMode),
+		zap.Bool("has_normalizer", s.tokenNormalizer != nil),
+		zap.Bool("has_config", s.fieldProcessingConfig != nil),
+		zap.Int("metadata_rules", len(s.tokenMetadataRules)),
+		zap.Bool("mutations_enabled", s.hasMutationsEnabled()),
+	)
+
 	// If no mutations are configured, return original bytes
 	if !s.hasMutationsEnabled() {
+		s.logger.Info("DEBUG: No mutations enabled, skipping")
 		return protoBytes, nil
 	}
 
@@ -56,6 +66,13 @@ func (s *KafkaSinker) applyAllMutations(ctx context.Context, message protoreflec
 	}
 
 	// 1. Token Metadata Injection
+	if s.debugMode {
+		s.logger.Debug("About to call injectTokenMetadata",
+			zap.Bool("has_normalizer", s.tokenNormalizer != nil),
+			zap.Bool("has_config", s.fieldProcessingConfig != nil),
+			zap.Int("metadata_rules", len(s.tokenMetadataRules)),
+		)
+	}
 	if err := s.injectTokenMetadata(ctx, message, blockNumber); err != nil {
 		s.logger.Warn("Token metadata injection failed", zap.Error(err))
 	}

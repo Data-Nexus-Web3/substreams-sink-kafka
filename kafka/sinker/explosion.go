@@ -1307,44 +1307,125 @@ func (s *KafkaSinker) preFetchBatchTokenMetadata(batch []*ExplodedArrayItem) (ma
 
 // applyTokenMetadataToMapWithMetadata applies token metadata injection using pre-fetched metadata
 func (s *KafkaSinker) applyTokenMetadataToMapWithMetadata(itemMap map[string]interface{}, preFetchedTokenMetadata map[string]*tokenmetadatav1.TokenMetadata) {
-	// Find token address using priority fields
-	var tokenAddress string
+	// Find token addresses using priority fields (now supports nested paths)
+	var tokenAddresses []string
+	var sourcePathInfo NestedPathInfo
+
 	for _, fieldName := range s.fieldProcessingConfig.DefaultTokenSourceFields {
-		if addr, exists := itemMap[fieldName]; exists {
-			if addrStr, ok := addr.(string); ok && addrStr != "" {
-				tokenAddress = addrStr
-				break
-			}
+		pathInfo := ParseNestedFieldPath(fieldName)
+		addresses := ExtractTokenAddressesFromNestedPath(itemMap, pathInfo)
+
+		if len(addresses) > 0 {
+			tokenAddresses = addresses
+			sourcePathInfo = pathInfo
+			break // Use first matching field in priority order
 		}
 	}
 
-	if tokenAddress == "" {
-		return
-	}
-
-	// Use pre-fetched metadata
-	metadata, exists := preFetchedTokenMetadata[tokenAddress]
-	if !exists {
+	if len(tokenAddresses) == 0 {
 		return
 	}
 
 	// Inject metadata into configured fields
 	for _, rule := range s.tokenMetadataRules {
-		itemMap[rule.TargetField] = map[string]interface{}{
-			"address":          metadata.Address,
-			"decimals":         metadata.Decimals,
-			"symbol":           metadata.Symbol,
-			"name":             metadata.Name,
-			"valid_from_block": metadata.ValidFromBlock,
-			"valid_to_block":   metadata.ValidToBlock,
-		}
+		s.injectTokenMetadataAtNestedPath(itemMap, rule.TargetField, tokenAddresses, sourcePathInfo, preFetchedTokenMetadata)
+	}
+}
 
-		if s.debugMode {
-			s.logger.Debug("Token metadata injected (pre-fetched)",
-				zap.String("target_field", rule.TargetField),
-				zap.String("token_address", tokenAddress),
-				zap.String("symbol", metadata.Symbol),
-			)
+// injectTokenMetadataAtNestedPath injects token metadata at a nested path with array inference
+func (s *KafkaSinker) injectTokenMetadataAtNestedPath(itemMap map[string]interface{}, targetField string, tokenAddresses []string, sourcePathInfo NestedPathInfo, preFetchedTokenMetadata map[string]*tokenmetadatav1.TokenMetadata) {
+	targetPathInfo := ParseNestedFieldPath(targetField)
+
+	// Determine if we should inject as array or single object based on source structure
+	isArraySource := len(tokenAddresses) > 1
+	if !isArraySource && sourcePathInfo.IsNested {
+		// Check if the source container was an array
+		container := GetNestedValueFromPath(itemMap, sourcePathInfo.ContainerPath)
+		if _, isArray := container.([]interface{}); isArray {
+			isArraySource = true
 		}
 	}
+
+	if targetPathInfo.IsNested {
+		// Inject at nested path
+		s.setNestedValue(itemMap, targetPathInfo.ContainerPath, s.createTokenMetadataObjects(tokenAddresses, preFetchedTokenMetadata, isArraySource))
+	} else {
+		// Inject at root level
+		itemMap[targetField] = s.createTokenMetadataObjects(tokenAddresses, preFetchedTokenMetadata, isArraySource)
+	}
+
+	if s.debugMode {
+		s.logger.Debug("Token metadata injected at nested path",
+			zap.String("target_field", targetField),
+			zap.Strings("token_addresses", tokenAddresses),
+			zap.Bool("is_array_source", isArraySource),
+			zap.Bool("is_nested", targetPathInfo.IsNested),
+		)
+	}
+}
+
+// createTokenMetadataObjects creates token metadata objects (single or array based on source)
+func (s *KafkaSinker) createTokenMetadataObjects(tokenAddresses []string, preFetchedTokenMetadata map[string]*tokenmetadatav1.TokenMetadata, isArraySource bool) interface{} {
+	var metadataObjects []map[string]interface{}
+	seenAddresses := make(map[string]bool) // Deduplicate addresses
+
+	for _, address := range tokenAddresses {
+		// Skip if we've already processed this address
+		if seenAddresses[address] {
+			continue
+		}
+		seenAddresses[address] = true
+
+		if metadata, exists := preFetchedTokenMetadata[address]; exists {
+			metadataObj := map[string]interface{}{
+				"address":  metadata.Address,
+				"decimals": metadata.Decimals,
+				"symbol":   metadata.Symbol,
+				"name":     metadata.Name,
+				// Exclude valid_from_block and valid_to_block from explosion logic too
+			}
+			metadataObjects = append(metadataObjects, metadataObj)
+		}
+	}
+
+	if isArraySource || len(metadataObjects) > 1 {
+		return metadataObjects
+	} else if len(metadataObjects) == 1 {
+		return metadataObjects[0]
+	}
+
+	return nil
+}
+
+// setNestedValue sets a value at a nested path in a map
+func (s *KafkaSinker) setNestedValue(data map[string]interface{}, path string, value interface{}) {
+	if path == "" {
+		return
+	}
+
+	parts := strings.Split(path, ".")
+	current := data
+
+	// Navigate to the parent of the target field
+	for _, part := range parts[:len(parts)-1] {
+		if next, exists := current[part]; exists {
+			if nextMap, ok := next.(map[string]interface{}); ok {
+				current = nextMap
+			} else {
+				// Path exists but is not a map, create new map
+				newMap := make(map[string]interface{})
+				current[part] = newMap
+				current = newMap
+			}
+		} else {
+			// Create new nested map
+			newMap := make(map[string]interface{})
+			current[part] = newMap
+			current = newMap
+		}
+	}
+
+	// Set the final value
+	finalPart := parts[len(parts)-1]
+	current[finalPart] = value
 }

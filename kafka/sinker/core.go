@@ -21,7 +21,16 @@ func (s *KafkaSinker) HandleBlockScopedData(ctx context.Context, data *pbsubstre
 	// Increment block counter atomically for thread safety
 	atomic.AddInt64(&s.blocksProcessed, 1)
 
-	// Check if field explosion is enabled and route accordingly
+	// Update received cursor (for undo signal handling)
+	s.lastReceivedCursor = cursor
+
+	// Check if undo buffer is enabled
+	if s.undoBufferSize > 0 && s.undoBuffer != nil {
+		// Undo buffer mode: buffer the block instead of processing immediately
+		return s.undoBuffer.AddBlock(data, isLive, cursor)
+	}
+
+	// Immediate processing mode: process block right away
 	if s.explodeFieldName != "" {
 		return s.handleWithFieldExplosion(ctx, data, isLive, cursor)
 	}
@@ -145,7 +154,29 @@ func (s *KafkaSinker) HandleBlockUndoSignal(ctx context.Context, undoSignal *pbs
 		zap.String("last_valid_block_id", undoSignal.LastValidBlock.Id),
 		zap.Uint64("last_valid_block_number", undoSignal.LastValidBlock.Number),
 		zap.Int64("undo_signals_handled", s.undoSignalsHandled),
+		zap.Bool("undo_buffer_enabled", s.undoBufferSize > 0),
 	)
+
+	// If undo buffer is enabled, handle reorg in buffer instead of sending to Kafka
+	if s.undoBufferSize > 0 && s.undoBuffer != nil {
+		s.logger.Info("undo buffer enabled - handling reorg in buffer, not sending undo signal to Kafka",
+			zap.Int("buffer_size", s.undoBufferSize),
+			zap.Uint64("last_valid_block", undoSignal.LastValidBlock.Number),
+		)
+
+		// Handle the undo in the buffer (discard invalidated blocks)
+		s.undoBuffer.HandleUndo(undoSignal)
+
+		// Save cursor but don't send undo message to Kafka
+		if err := s.saveCursor(cursor); err != nil {
+			s.logger.Warn("failed to save cursor after undo", zap.Error(err))
+		}
+
+		return nil
+	}
+
+	// Original immediate mode behavior: send undo signal to Kafka
+	s.logger.Info("immediate processing mode - sending undo signal to Kafka for downstream consumers")
 
 	// For Kafka, we can't "undo" messages that have already been sent,
 	// but we can send an undo signal message to inform downstream consumers
@@ -155,9 +186,12 @@ func (s *KafkaSinker) HandleBlockUndoSignal(ctx context.Context, undoSignal *pbs
 	var messageBytes []byte
 	var err error
 
+	// Use a separate topic for undo signals to avoid mixing message types
+	undoTopic := s.topic + "_undo"
+
 	if s.useSchemaRegistry {
 		// Use Schema Registry serialization for undo signals too
-		messageBytes, err = s.protobufSerializer.Serialize(s.schemaSubject, undoSignal)
+		messageBytes, err = s.protobufSerializer.Serialize(undoTopic, undoSignal)
 		if err != nil {
 			return fmt.Errorf("failed to serialize BlockUndoSignal with Schema Registry: %w", err)
 		}
@@ -172,7 +206,7 @@ func (s *KafkaSinker) HandleBlockUndoSignal(ctx context.Context, undoSignal *pbs
 	// Send undo signal to Kafka
 	err = s.producer.Produce(&kafka.Message{
 		TopicPartition: kafka.TopicPartition{
-			Topic:     &s.topic,
+			Topic:     &undoTopic,
 			Partition: kafka.PartitionAny,
 		},
 		Key:   []byte(key),
@@ -239,6 +273,13 @@ func (s *KafkaSinker) Close() error {
 	if s.tokenNormalizer != nil {
 		if err := s.tokenNormalizer.Close(); err != nil {
 			s.logger.Warn("Failed to close token normalizer", zap.Error(err))
+		}
+	}
+
+	// Close undo buffer if enabled
+	if s.undoBuffer != nil {
+		if err := s.undoBuffer.Close(); err != nil {
+			s.logger.Warn("Failed to close undo buffer", zap.Error(err))
 		}
 	}
 

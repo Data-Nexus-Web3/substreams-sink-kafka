@@ -198,6 +198,9 @@ func SinkerFactory(baseSinker *sink.Sinker, options SinkerFactoryOptions) func(c
 			tokenAddressFields:       options.TokenAddressFields,
 			enableTokenNormalization: options.TokenMetadataEndpoint != "",
 
+			// Undo buffer configuration
+			undoBufferSize: options.UndoBufferSize,
+
 			// Initialize high-performance async system
 			deliveryChan:      make(chan kafka.Event, 10000), // Large buffer for delivery events
 			pendingMessages:   make(map[string]*sink.Cursor),
@@ -253,6 +256,17 @@ func SinkerFactory(baseSinker *sink.Sinker, options SinkerFactoryOptions) func(c
 				zap.Strings("source_fields", options.TokenSourceFields),
 				zap.Bool("omit_empty_strings", options.OmitEmptyStrings),
 			)
+		}
+
+		// Initialize undo buffer if enabled
+		if options.UndoBufferSize > 0 {
+			kafkaSinker.undoBuffer = NewUndoBuffer(options.UndoBufferSize, kafkaSinker, logger)
+			logger.Info("Undo buffer enabled for reorg protection",
+				zap.Int("buffer_size", options.UndoBufferSize),
+				zap.String("mode", "blocks_behind_head"),
+			)
+		} else {
+			logger.Info("Undo buffer disabled - using immediate processing mode")
 		}
 
 		// Start background delivery confirmation handler

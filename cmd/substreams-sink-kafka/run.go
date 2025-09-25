@@ -67,10 +67,10 @@ func addKafkaFlags(flags *pflag.FlagSet) {
 	flags.String("profiling-output-dir", "./profiles", "Directory for profiling output files")
 	flags.Int("profiling-http-port", 6060, "Port for pprof HTTP server (use 0 to disable)")
 
-
-
 	// Output formatting flags
 	flags.Bool("hex-encode-bytes", false, "Encode byte fields as hex strings with 0x prefix (default: raw bytes)")
+
+	// Note: undo-buffer-size flag is provided by the base sink.AddFlagsToSet() call above
 }
 
 func sinkRunE(cmd *cobra.Command, args []string) error {
@@ -183,6 +183,9 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 	// Get output formatting configuration
 	hexEncodeBytes := sflags.MustGetBool(cmd, "hex-encode-bytes")
 
+	// Get undo buffer configuration
+	undoBufferSize := sflags.MustGetInt(cmd, "undo-buffer-size")
+
 	// Validate Schema Registry configuration for schema-registry format
 	if outputFormat == "schema-registry" && schemaRegistryURL == "" {
 		return fmt.Errorf("--schema-registry-url is required when using --output-format=schema-registry")
@@ -191,13 +194,27 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 	// Validate explosion configuration
 	// No validation needed for explode-field - empty string means no explosion
 
-	// Validate token normalization configuration
+	// Validate token GRPC configuration - two independent use cases
 	if tokenMetadataEndpoint != "" {
-		if len(tokenValueFields) == 0 {
-			return fmt.Errorf("--token-value-fields is required when --token-metadata-grpc-endpoint is specified")
+		hasTokenNormalization := len(tokenValueFields) > 0 || len(tokenAddressFields) > 0
+		hasTokenMetadataInjection := len(tokenMetadataFields) > 0 || len(tokenSourceFields) > 0
+
+		// Must have at least one use case configured
+		if !hasTokenNormalization && !hasTokenMetadataInjection {
+			return fmt.Errorf("--token-metadata-grpc-endpoint requires either token normalization fields (--token-value-fields + --token-address-fields) or token metadata injection fields (--token-metadata-fields + --token-source-fields)")
 		}
-		if len(tokenAddressFields) == 0 {
-			return fmt.Errorf("--token-address-fields is required when --token-metadata-grpc-endpoint is specified")
+
+		// Validate token normalization configuration (if used)
+		if len(tokenValueFields) > 0 && len(tokenAddressFields) == 0 {
+			return fmt.Errorf("--token-address-fields is required when --token-value-fields is specified")
+		}
+		if len(tokenAddressFields) > 0 && len(tokenValueFields) == 0 {
+			return fmt.Errorf("--token-value-fields is required when --token-address-fields is specified")
+		}
+
+		// Validate token metadata injection configuration (if used)
+		if len(tokenMetadataFields) > 0 && len(tokenSourceFields) == 0 {
+			return fmt.Errorf("--token-source-fields is required when --token-metadata-fields is specified")
 		}
 	}
 
@@ -276,6 +293,9 @@ func sinkRunE(cmd *cobra.Command, args []string) error {
 
 		// Output formatting options
 		HexEncodeBytes: hexEncodeBytes,
+
+		// Undo buffer options
+		UndoBufferSize: undoBufferSize,
 	})
 
 	kafkaSink, err := sinkerFactory(app.Context(), zlog, tracer)

@@ -75,16 +75,18 @@ func (s *KafkaSinker) cursorSaveHandler(ctx context.Context) {
 		select {
 		case <-s.cursorSaveTicker.C:
 			// Save cursor periodically
-			if s.lastConfirmedCursor != nil {
-				if err := s.saveCursor(s.lastConfirmedCursor); err != nil {
+			cursorToSave := s.getCursorToSave()
+			if cursorToSave != nil {
+				if err := s.saveCursor(cursorToSave); err != nil {
 					s.logger.Warn("failed to save cursor", zap.Error(err))
 				}
 			}
 
 		case <-s.confirmedMessages:
 			// Message confirmed, save cursor immediately for low latency
-			if s.lastConfirmedCursor != nil {
-				if err := s.saveCursor(s.lastConfirmedCursor); err != nil {
+			cursorToSave := s.getCursorToSave()
+			if cursorToSave != nil {
+				if err := s.saveCursor(cursorToSave); err != nil {
 					s.logger.Warn("failed to save cursor", zap.Error(err))
 				}
 			}
@@ -92,10 +94,22 @@ func (s *KafkaSinker) cursorSaveHandler(ctx context.Context) {
 		case <-ctx.Done():
 			s.logger.Info("cursor saver shutting down")
 			// Final cursor save
-			if s.lastConfirmedCursor != nil {
-				s.saveCursor(s.lastConfirmedCursor)
+			cursorToSave := s.getCursorToSave()
+			if cursorToSave != nil {
+				s.saveCursor(cursorToSave)
 			}
 			return
 		}
+	}
+}
+
+// getCursorToSave returns the appropriate cursor to save based on processing mode
+func (s *KafkaSinker) getCursorToSave() *sink.Cursor {
+	if s.undoBufferSize > 0 {
+		// In undo buffer mode, save the last processed cursor (blocks sent to Kafka)
+		return s.lastProcessedCursor
+	} else {
+		// In immediate mode, save the last confirmed cursor (original logic)
+		return s.lastConfirmedCursor
 	}
 }

@@ -36,7 +36,7 @@ func (s *KafkaSinker) serializeToJSON(data *pbsubstreamsrpc.BlockScopedData) ([]
 			return nil, fmt.Errorf("failed to marshal to JSON: %w", err)
 		}
 
-		// Token normalization now happens upstream in applyUpstreamMutations()
+		// Token normalization and metadata injection now happen upstream in applyUpstreamMutations()
 		// No need for separate JSON post-processing
 
 		return jsonBytes, nil
@@ -100,19 +100,16 @@ func (s *KafkaSinker) serializeExplodedRecordAsProtobuf(record map[string]interf
 		return nil, fmt.Errorf("protobuf serializer is not initialized")
 	}
 
-	// Use a subject that matches the topic name for exploded records
-	// Extract topic name from the base topic and create {topic_name}-value subject
-	topicName := strings.TrimPrefix(s.baseTopic, "adr-")
-	topicName = strings.ReplaceAll(topicName, "-", "_")
-	explodedSubject := topicName + "-value"
+	// Use the topic name; Confluent serializer appends the suffix automatically
+	subjectTopic := s.topic
 
 	s.logger.Debug("Serializing exploded record as protobuf",
-		zap.String("subject", explodedSubject),
+		zap.String("topic", subjectTopic),
 		zap.Int("record_fields", len(record)),
 	)
 
 	// Serialize using Schema Registry - it expects the protobuf message struct
-	return s.protobufSerializer.Serialize(explodedSubject, explodedRecord)
+	return s.protobufSerializer.Serialize(subjectTopic, explodedRecord)
 }
 
 func (s *KafkaSinker) createExplodedRecordMessage(record map[string]interface{}) *pbkafka.ExplodedRecord {

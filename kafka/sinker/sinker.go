@@ -82,6 +82,12 @@ type KafkaSinker struct {
 	lastStatsTime       time.Time
 	lastBlocksProcessed int64
 	currentThroughput   float64
+
+	// Undo buffer for reorg protection
+	undoBufferSize      int
+	undoBuffer          *UndoBuffer
+	lastReceivedCursor  *sink.Cursor // Last cursor received from substreams
+	lastProcessedCursor *sink.Cursor // Last cursor for blocks sent to Kafka
 }
 
 // ExplodedMessage represents a message that has been exploded from a nested structure
@@ -136,6 +142,9 @@ type SinkerFactoryOptions struct {
 
 	// Output formatting options
 	HexEncodeBytes bool // Encode byte fields as hex strings with 0x prefix
+
+	// Undo buffer options
+	UndoBufferSize int // Number of blocks to buffer before processing (0 = disabled)
 }
 
 // Global variables for async delivery system
