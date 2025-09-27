@@ -1,0 +1,16 @@
+# Keep source files in Docker build context; avoid broad ignores
+
+# VCS
+.git
+
+# OS junk
+**/.DS_Store
+
+# Build outputs
+bin/
+dist/
+build/
+
+# Caches/temp
+**/.cache/
+**/tmp/
