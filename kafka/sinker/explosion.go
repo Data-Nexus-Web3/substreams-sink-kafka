@@ -190,7 +190,8 @@ func (s *KafkaSinker) processBatchedArrayItemsWithMetadata(batch []*ExplodedArra
 	)
 
 	// Use parallel processing for larger batches, or always when configured
-	if s.explodeAlwaysParallel || (batchSize >= 100 && workerCount > 1) {
+	// Lower threshold from 100 to 10 for better CPU utilization with small batches
+	if s.explodeAlwaysParallel || (batchSize >= 10 && workerCount > 1) {
 		return s.processParallelBatchWithMetadata(batch, workerCount, startTime, batchTokenMetadata)
 	} else {
 		return s.processSequentialBatchWithMetadata(batch, startTime, batchTokenMetadata)
@@ -205,10 +206,10 @@ func (s *KafkaSinker) calculateOptimalWorkerCount(batchSize int) int {
 		maxWorkers = 5
 	}
 	const minWorkers = 1
-	const itemsPerWorker = 500 // Optimal items per worker based on testing
+	const itemsPerWorker = 50 // Reduced from 500 to better utilize CPU for small batches
 
-	if batchSize < 100 {
-		return minWorkers // Use sequential processing for small batches
+	if batchSize < 10 {
+		return minWorkers // Use sequential processing for very small batches
 	}
 
 	workerCount := (batchSize + itemsPerWorker - 1) / itemsPerWorker // Ceiling division
