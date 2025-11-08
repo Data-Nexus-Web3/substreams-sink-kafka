@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	pbkafka "github.com/Data-Nexus-Web3/substreams-sink-kafka/proto/sf/substreams/sink/kafka/v1"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	"github.com/confluentinc/confluent-kafka-go/v2/schemaregistry"
 	"github.com/confluentinc/confluent-kafka-go/v2/schemaregistry/serde"
@@ -189,6 +190,17 @@ func (s *KafkaSinker) initializeSchemaRegistryHeaders() error {
 					copy(s.srHeaderExploded, framedItem)
 				}
 			}
+		}
+	}
+
+	// Proactively register BlockReorg schema on the undo topic subject to avoid first-event latencies
+	// Subject for SR serializer is the topic; Confluent appends -value automatically
+	undoSubject := s.topic + "_undo"
+	// We don't need to keep the header for reorg; just trigger registration by serializing an empty message
+	if undoSubject != "" {
+		_, err := tempSerializer.Serialize(undoSubject, &pbkafka.BlockReorg{})
+		if err != nil {
+			s.logger.Warn("failed SR serialize for BlockReorg (undo)", zap.Error(err))
 		}
 	}
 	return nil

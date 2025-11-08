@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package sf.substreams.sink.kafka.v1;
+
+option go_package = "github.com/Data-Nexus-Web3/substreams-sink-kafka/proto/sf/substreams/sink/kafka/v1;pbkafka";
+
+message BlockReorg {
+  string last_valid_cursor = 1;
+  string last_valid_block_id = 2;
+  uint64 last_valid_block_number = 3;
+  uint64 substream_notification_timestamp = 4; // unix seconds when notification was handled
+}
+
+

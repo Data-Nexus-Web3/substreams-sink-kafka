@@ -247,10 +247,10 @@ func SinkerFactory(baseSinker *sink.Sinker, options SinkerFactoryOptions) func(c
 			}()
 		}
 
-		// If fast-path is enabled, precompute Schema Registry headers
-		if useSchemaRegistry && options.SchemaFastPath {
+		// Initialize Schema Registry headers and prime schemas whenever SR is enabled
+		if useSchemaRegistry {
 			if err := kafkaSinker.initializeSchemaRegistryHeaders(); err != nil {
-				return nil, fmt.Errorf("failed to initialize SR fast-path headers: %w", err)
+				return nil, fmt.Errorf("failed to initialize Schema Registry headers: %w", err)
 			}
 		}
 

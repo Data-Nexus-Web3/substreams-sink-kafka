@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	pbkafka "github.com/Data-Nexus-Web3/substreams-sink-kafka/proto/sf/substreams/sink/kafka/v1"
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
 	pbsubstreamsrpc "github.com/streamingfast/substreams/pb/sf/substreams/rpc/v2"
 	sink "github.com/streamingfast/substreams/sink"
@@ -223,24 +224,32 @@ func (s *KafkaSinker) HandleBlockUndoSignal(ctx context.Context, undoSignal *pbs
 	// but we can send an undo signal message to inform downstream consumers
 	key := fmt.Sprintf("undo_%d_%s", undoSignal.LastValidBlock.Number, undoSignal.LastValidBlock.Id)
 
-	// Serialize the undo signal
+	// Serialize a compact reorg message
 	var messageBytes []byte
 	var err error
 
 	// Use a separate topic for undo signals to avoid mixing message types
 	undoTopic := s.topic + "_undo"
 
+	// Build compact BlockReorg payload
+	reorg := &pbkafka.BlockReorg{
+		LastValidCursor:                cursor.String(),
+		LastValidBlockId:               undoSignal.LastValidBlock.Id,
+		LastValidBlockNumber:           undoSignal.LastValidBlock.Number,
+		SubstreamNotificationTimestamp: uint64(time.Now().Unix()),
+	}
+
 	if s.useSchemaRegistry {
-		// Use Schema Registry serialization for undo signals too
-		messageBytes, err = s.protobufSerializer.Serialize(undoTopic, undoSignal)
+		// Use Schema Registry serialization for reorg messages too
+		messageBytes, err = s.protobufSerializer.Serialize(undoTopic, reorg)
 		if err != nil {
-			return fmt.Errorf("failed to serialize BlockUndoSignal with Schema Registry: %w", err)
+			return fmt.Errorf("failed to serialize BlockReorg with Schema Registry: %w", err)
 		}
 	} else {
 		// Use standard protobuf serialization
-		messageBytes, err = proto.Marshal(undoSignal)
+		messageBytes, err = proto.Marshal(reorg)
 		if err != nil {
-			return fmt.Errorf("failed to marshal BlockUndoSignal: %w", err)
+			return fmt.Errorf("failed to marshal BlockReorg: %w", err)
 		}
 	}
 
