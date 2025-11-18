@@ -195,7 +195,7 @@ func (s *KafkaSinker) initializeSchemaRegistryHeaders() error {
 
 	// Proactively register BlockReorg schema on the undo topic subject to avoid first-event latencies
 	// Subject for SR serializer is the topic; Confluent appends -value automatically
-	undoSubject := s.topic + "_undo"
+	undoSubject := s.topic + "-undo"
 	// We don't need to keep the header for reorg; just trigger registration by serializing an empty message
 	if undoSubject != "" {
 		_, err := tempSerializer.Serialize(undoSubject, &pbkafka.BlockReorg{})

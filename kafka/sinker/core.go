@@ -229,7 +229,7 @@ func (s *KafkaSinker) HandleBlockUndoSignal(ctx context.Context, undoSignal *pbs
 	var err error
 
 	// Use a separate topic for undo signals to avoid mixing message types
-	undoTopic := s.topic + "_undo"
+	undoTopic := s.topic + "-undo"
 
 	// Build compact BlockReorg payload
 	reorg := &pbkafka.BlockReorg{
