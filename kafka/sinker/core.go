@@ -139,6 +139,11 @@ func (s *KafkaSinker) handleWithoutExplosion(ctx context.Context, data *pbsubstr
 		)
 
 	case "schema-registry":
+		// If there is no module output for this block, skip producing anything in SR mode.
+		// This avoids falling back to serializing BlockScopedData which would require SR deps.
+		if data.Output == nil || data.Output.MapOutput == nil || data.Output.MapOutput.Value == nil {
+			return nil
+		}
 		messageBytes, err = s.serializeWithSchemaRegistry(data)
 		if err != nil {
 			return fmt.Errorf("failed to serialize with Schema Registry: %w", err)
